@@ -3,12 +3,7 @@ use std::sync::mpsc::Sender;
 use anyhow::Context;
 use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode};
 
-// x runs from 0.0 at the left edge of the bar to 1.0 at the right.
-#[derive(Debug, Clone, Copy)]
-pub enum Touch {
-    At(f64),
-    Up,
-}
+use crate::daemon::Event;
 
 pub fn find_touch_device() -> anyhow::Result<Device> {
     for (path, device) in evdev::enumerate() {
@@ -21,8 +16,8 @@ pub fn find_touch_device() -> anyhow::Result<Device> {
     anyhow::bail!("no Touch Bar input device found")
 }
 
-// Reads touches on a thread and sends them down the channel.
-pub fn spawn_reader(mut device: Device, tx: Sender<Touch>) -> anyhow::Result<()> {
+// Reads the bar on a thread and sends Touch and Release events.
+pub fn spawn_reader(mut device: Device, tx: Sender<Event>) -> anyhow::Result<()> {
     let max_x = device
         .get_absinfo()?
         .find(|(axis, _)| *axis == AbsoluteAxisCode::ABS_X)
@@ -44,7 +39,7 @@ pub fn spawn_reader(mut device: Device, tx: Sender<Touch>) -> anyhow::Result<()>
                 }
             };
             for event in events {
-                let touch = match event.destructure() {
+                let message = match event.destructure() {
                     EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_X, v) => {
                         x = v as f64 / max_x;
                         continue;
@@ -53,12 +48,12 @@ pub fn spawn_reader(mut device: Device, tx: Sender<Touch>) -> anyhow::Result<()>
                         down = v == 1;
                         continue;
                     }
-                    // A report is complete: say where the finger is, or that it is gone.
-                    EventSummary::Synchronization(..) if down => Touch::At(x),
-                    EventSummary::Synchronization(..) => Touch::Up,
+                    // A report is complete: say where the finger is, or that it lifted.
+                    EventSummary::Synchronization(..) if down => Event::Touch(x),
+                    EventSummary::Synchronization(..) => Event::Release,
                     _ => continue,
                 };
-                if tx.send(touch).is_err() {
+                if tx.send(message).is_err() {
                     return;
                 }
             }

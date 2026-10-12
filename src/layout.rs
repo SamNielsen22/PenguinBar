@@ -1,46 +1,60 @@
 use evdev::KeyCode;
 
-pub struct Key {
-    pub label: String,
-    pub key: KeyCode,
+// What happens when a key is tapped.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    Key(KeyCode),
+    Command(String),
+    // Opens or closes the Control Strip.
+    ToggleStrip,
 }
 
-// Keys in a group sit close together; groups have a wider gap between them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Key {
+    pub label: String,
+    pub action: Action,
+}
+
+// Keys in a group share one plate, with thin dividers between them.
+pub type Groups = Vec<Vec<Key>>;
+
+// Groups run from the left edge. The strip is the Control Strip,
+// which hugs the right edge. It is empty while the strip is expanded.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
-    pub groups: Vec<Vec<Key>>,
+    pub groups: Groups,
+    pub strip: Vec<Key>,
 }
 
 impl Layout {
-    // Apple's own row: esc, screen brightness, keyboard light, media, volume.
-    pub fn default_row() -> Self {
-        let key = |label: &str, key| Key { label: label.to_string(), key };
-        Layout {
-            groups: vec![
-                vec![key("esc", KeyCode::KEY_ESC)],
-                vec![
-                    key("󰃞", KeyCode::KEY_BRIGHTNESSDOWN),
-                    key("󰃠", KeyCode::KEY_BRIGHTNESSUP),
-                ],
-                vec![
-                    key("󰌌 -", KeyCode::KEY_KBDILLUMDOWN),
-                    key("󰌌 +", KeyCode::KEY_KBDILLUMUP),
-                ],
-                vec![
-                    key("󰒮", KeyCode::KEY_PREVIOUSSONG),
-                    key("󰐊", KeyCode::KEY_PLAYPAUSE),
-                    key("󰒭", KeyCode::KEY_NEXTSONG),
-                ],
-                vec![
-                    key("󰝟", KeyCode::KEY_MUTE),
-                    key("󰖀", KeyCode::KEY_VOLUMEDOWN),
-                    key("󰕾", KeyCode::KEY_VOLUMEUP),
-                ],
-            ],
-        }
+    // Every plate in order: each group, then the strip.
+    pub fn plates(&self) -> impl Iterator<Item = &[Key]> {
+        let groups = self.groups.iter().map(Vec::as_slice);
+        groups.chain(std::iter::once(self.strip.as_slice()))
     }
 
-    // All keys left to right, ignoring groups.
+    // All keys left to right.
     pub fn keys(&self) -> impl Iterator<Item = &Key> {
-        self.groups.iter().flatten()
+        self.plates().flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(label: &str) -> Key {
+        Key { label: label.to_string(), action: Action::ToggleStrip }
+    }
+
+    #[test]
+    fn keys_run_through_the_groups_then_the_strip() {
+        let layout = Layout {
+            groups: vec![vec![key("a")], vec![key("b"), key("c")]],
+            strip: vec![key("d")],
+        };
+        let labels: Vec<&str> = layout.keys().map(|k| k.label.as_str()).collect();
+        assert_eq!(labels, ["a", "b", "c", "d"]);
+        assert_eq!(layout.plates().count(), 3);
     }
 }

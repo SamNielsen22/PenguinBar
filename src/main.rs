@@ -1,8 +1,10 @@
 mod actions;
+mod config;
 mod daemon;
 mod input;
 mod layout;
 mod render;
+mod state;
 mod transport;
 
 use std::path::PathBuf;
@@ -12,7 +14,7 @@ use clap::{Parser, Subcommand};
 use evdev::KeyCode;
 
 use actions::Keyboard;
-use layout::Layout;
+use config::Config;
 use render::{keys, Canvas, Rgb};
 use transport::Display;
 
@@ -39,7 +41,15 @@ enum Command {
     Info,
     Fill { colour: String },
     Text { text: String },
-    Row,
+    /// Draw the bar as an app would see it
+    Row {
+        /// Window class, like firefox. Leave empty for a bar with no app keys
+        #[arg(default_value = "")]
+        class: String,
+        /// Show the strip expanded over the app's keys
+        #[arg(long)]
+        expanded: bool,
+    },
     Touch,
     Key { name: String },
     Run,
@@ -60,13 +70,16 @@ fn main() -> anyhow::Result<()> {
             canvas.fill(BG)?;
             canvas.text(&text, 28.0, FG)
         }),
-        Command::Row => show(cli.png, |canvas| keys::draw_row(canvas, &Layout::default_row(), None)),
+        Command::Row { class, expanded } => {
+            let layout = Config::load()?.layout_for(&class, expanded);
+            show(cli.png, |canvas| keys::draw_row(canvas, &layout, None))
+        }
         Command::Touch => {
             let (tx, rx) = mpsc::channel();
             input::spawn_reader(input::find_touch_device()?, tx)?;
             println!("touch the bar. Ctrl-C to exit.");
-            for touch in rx {
-                println!("{touch:?}");
+            for event in rx {
+                println!("{event:?}");
             }
             Ok(())
         }
@@ -113,4 +126,21 @@ fn parse_colour(s: &str) -> anyhow::Result<Rgb> {
     };
     let channel = |shift: u32| ((n >> shift) & 0xff) as f64 / 255.0;
     Ok((channel(16), channel(8), channel(0)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hex_colours() {
+        assert_eq!(parse_colour("#ff0000").unwrap(), (1.0, 0.0, 0.0));
+        assert_eq!(parse_colour("00ff00").unwrap(), (0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn rejects_bad_colours() {
+        assert!(parse_colour("#ff00").is_err());
+        assert!(parse_colour("zz0000").is_err());
+    }
 }
