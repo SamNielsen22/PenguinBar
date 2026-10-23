@@ -1,6 +1,7 @@
 pub mod keys;
+pub mod media;
 
-use std::f64::consts::FRAC_PI_2;
+use std::f64::consts::{FRAC_PI_2, PI};
 use std::fs::File;
 use std::path::Path;
 
@@ -8,8 +9,46 @@ use anyhow::Context as _;
 use cairo::{Context, FontSlant, FontWeight, Format, ImageSurface};
 
 pub const FONT: &str = "JetBrainsMono Nerd Font";
+pub const TEXT_FONT: &str = "sans-serif";
 
 pub type Rgb = (f64, f64, f64);
+
+// Apple's palette: a black bar, grey plates, white labels.
+pub const BLACK: Rgb = (0.0, 0.0, 0.0);
+pub const PLATE: Rgb = (0.22, 0.22, 0.22);
+pub const PLATE_PRESSED: Rgb = (0.45, 0.45, 0.45);
+pub const DIVIDER: Rgb = (0.14, 0.14, 0.14);
+pub const LABEL: Rgb = (1.0, 1.0, 1.0);
+
+// Plates stop this far from the top and bottom, and dividers are this wide.
+pub const INSET: f64 = 2.0;
+pub const DIVIDER_WIDTH: f64 = 2.0;
+const RADIUS: f64 = 8.0;
+
+pub fn colour(cr: &Context, (r, g, b): Rgb) {
+    cr.set_source_rgb(r, g, b);
+}
+
+// A plate from left to right, nearly the full height of the bar.
+pub fn rounded_rect(cr: &Context, left: f64, right: f64, height: f64) {
+    let (top, bottom) = (INSET, height - INSET);
+    cr.new_sub_path();
+    cr.arc(right - RADIUS, top + RADIUS, RADIUS, -FRAC_PI_2, 0.0);
+    cr.arc(right - RADIUS, bottom - RADIUS, RADIUS, 0.0, FRAC_PI_2);
+    cr.arc(left + RADIUS, bottom - RADIUS, RADIUS, FRAC_PI_2, PI);
+    cr.arc(left + RADIUS, top + RADIUS, RADIUS, PI, 3.0 * FRAC_PI_2);
+    cr.close_path();
+}
+
+// Draws text with its centre at (x, y).
+pub fn centred_text(cr: &Context, font: &str, size: f64, text: &str, x: f64, y: f64) -> anyhow::Result<()> {
+    cr.select_font_face(font, FontSlant::Normal, FontWeight::Normal);
+    cr.set_font_size(size);
+    let ext = cr.text_extents(text)?;
+    cr.move_to(x - ext.width() / 2.0 - ext.x_bearing(), y - ext.height() / 2.0 - ext.y_bearing());
+    cr.show_text(text)?;
+    Ok(())
+}
 
 pub struct Canvas {
     surface: ImageSurface,

@@ -11,6 +11,7 @@ cairo-rs = { version = "0.22.9", features = ["png"] }
 clap = { version = "4.6.7", features = ["derive"] }
 drm = "0.15.0"
 evdev = "0.13.2"
+mpris = "2.1.0"
 notify = "8.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"

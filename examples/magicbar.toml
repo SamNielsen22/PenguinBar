@@ -5,9 +5,12 @@
 # keys in the middle, and the Control Strip on the right. Tap the strip's
 # chevron to expand it over the app's keys, and the x to close it again.
 #
-# A key has a label and either a key to press or a command to run.
-# Key names are the Linux ones, like KEY_VOLUMEUP. Labels can be text
-# or Nerd Font icons. Keys in a group share one plate.
+# A key has a label and either a key to press, like KEY_VOLUMEUP, or a
+# command to run in a shell, like command = "playerctl next". Labels can
+# be text or Nerd Font icons. Keys in a group share one plate.
+#
+# { widget = "media" } is Apple's now-playing bar: play or pause, and a
+# bar you can drag to seek. It appears while the focused app is playing.
 
 # Far left in every layout.
 esc = { label = "esc", key = "KEY_ESC" }
@@ -42,6 +45,10 @@ expanded = [
     ],
 ]
 
+# Shown for every app without a layout of its own.
+[layouts.default]
+groups = [[{ widget = "media" }]]
+
 # App keys fill the middle while one of these apps is focused.
 # Find an app's class with: hyprctl activewindow
 [layouts.browser]
@@ -52,6 +59,5 @@ groups = [
         { label = "󰁔", key = "KEY_FORWARD" },
         { label = "󰑐", key = "KEY_REFRESH" },
     ],
-    # A command runs in a shell instead of pressing a key.
-    [{ label = "󰹑", command = "grim ~/Pictures/screenshot.png" }],
+    [{ widget = "media" }],
 ]

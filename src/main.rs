@@ -3,18 +3,21 @@ mod config;
 mod daemon;
 mod input;
 mod layout;
+mod media;
 mod render;
 mod state;
 mod transport;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use evdev::KeyCode;
 
 use actions::Keyboard;
 use config::Config;
+use media::NowPlaying;
 use render::{keys, Canvas, Rgb};
 use transport::Display;
 
@@ -49,8 +52,20 @@ enum Command {
         /// Show the strip expanded over the app's keys
         #[arg(long)]
         expanded: bool,
+        /// Pretend a track is playing, to see the media widget
+        #[arg(long)]
+        playing: bool,
     },
     Touch,
+    /// Print what the music or video player is doing
+    Media {
+        /// Toggle play and pause first
+        #[arg(long)]
+        play_pause: bool,
+        /// Jump to this many seconds into the track first
+        #[arg(long)]
+        seek: Option<u64>,
+    },
     Key { name: String },
     Run,
 }
@@ -70,14 +85,39 @@ fn main() -> anyhow::Result<()> {
             canvas.fill(BG)?;
             canvas.text(&text, 28.0, FG)
         }),
-        Command::Row { class, expanded } => {
-            let layout = Config::load()?.layout_for(&class, expanded);
-            show(cli.png, |canvas| keys::draw_row(canvas, &layout, None))
+        Command::Row { class, expanded, playing } => {
+            let layout = Config::load()?.layout_for(&class, expanded, playing);
+            let now = if playing {
+                Some(NowPlaying {
+                    app: class.clone(),
+                    playing: true,
+                    position: Duration::from_secs(64),
+                    length: Duration::from_secs(210),
+                })
+            } else {
+                None
+            };
+            show(cli.png, |canvas| keys::draw_row(canvas, &layout, None, now.as_ref()))
         }
         Command::Touch => {
             let (tx, rx) = mpsc::channel();
             input::spawn_reader(input::find_touch_device()?, tx)?;
             println!("touch the bar. Ctrl-C to exit.");
+            for event in rx {
+                println!("{event:?}");
+            }
+            Ok(())
+        }
+        Command::Media { play_pause, seek } => {
+            if play_pause {
+                media::play_pause()?;
+            }
+            if let Some(seconds) = seek {
+                media::seek_to(Duration::from_secs(seconds))?;
+            }
+            let (tx, rx) = mpsc::channel();
+            media::spawn_watcher(tx);
+            println!("watching the player. Ctrl-C to exit.");
             for event in rx {
                 println!("{event:?}");
             }

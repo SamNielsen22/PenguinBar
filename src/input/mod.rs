@@ -1,7 +1,7 @@
 use std::sync::mpsc::Sender;
 
 use anyhow::Context;
-use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode};
+use evdev::{AbsoluteAxisCode, Device, EventSummary};
 
 use crate::daemon::Event;
 
@@ -16,7 +16,9 @@ pub fn find_touch_device() -> anyhow::Result<Device> {
     anyhow::bail!("no Touch Bar input device found")
 }
 
-// Reads the bar on a thread and sends Touch and Release events.
+// Reads the bar on a thread and sends a Touch event for every report.
+// The bar reports about sixty times a second while a finger is on it, and
+// goes quiet when the finger lifts. It never says "lifted" itself.
 pub fn spawn_reader(mut device: Device, tx: Sender<Event>) -> anyhow::Result<()> {
     let max_x = device
         .get_absinfo()?
@@ -29,7 +31,6 @@ pub fn spawn_reader(mut device: Device, tx: Sender<Event>) -> anyhow::Result<()>
 
     std::thread::spawn(move || {
         let mut x = 0.0;
-        let mut down = false;
         loop {
             let events = match device.fetch_events() {
                 Ok(events) => events,
@@ -39,22 +40,15 @@ pub fn spawn_reader(mut device: Device, tx: Sender<Event>) -> anyhow::Result<()>
                 }
             };
             for event in events {
-                let message = match event.destructure() {
-                    EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_X, v) => {
-                        x = v as f64 / max_x;
-                        continue;
+                match event.destructure() {
+                    EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_X, v) => x = v as f64 / max_x,
+                    // A report is complete: say where the finger is.
+                    EventSummary::Synchronization(..) => {
+                        if tx.send(Event::Touch(x)).is_err() {
+                            return;
+                        }
                     }
-                    EventSummary::Key(_, KeyCode::BTN_TOUCH, v) => {
-                        down = v == 1;
-                        continue;
-                    }
-                    // A report is complete: say where the finger is, or that it lifted.
-                    EventSummary::Synchronization(..) if down => Event::Touch(x),
-                    EventSummary::Synchronization(..) => Event::Release,
-                    _ => continue,
-                };
-                if tx.send(message).is_err() {
-                    return;
+                    _ => {}
                 }
             }
         }
