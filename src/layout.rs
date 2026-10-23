@@ -7,19 +7,26 @@ pub enum Action {
     Command(String),
     // Opens or closes the Control Strip.
     ToggleStrip,
+    Workspace(i32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Key {
     pub label: String,
     pub action: Action,
+    // Drawn with a white outline.
+    pub lit: bool,
+    // A PNG drawn instead of the label.
+    pub image: Option<Vec<u8>>,
 }
 
-// One slot in the bar: a key, or Apple's now-playing widget.
+// One slot in the bar: a key, the now-playing widget, or the workspace
+// switcher. Widgets are filled in from live state.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     Key(Key),
     Media,
+    Workspaces,
 }
 
 // Items in a group share one plate, with thin dividers between them.
@@ -51,7 +58,7 @@ mod tests {
     use super::*;
 
     fn key(label: &str) -> Item {
-        Item::Key(Key { label: label.to_string(), action: Action::ToggleStrip })
+        Item::Key(Key { label: label.to_string(), action: Action::ToggleStrip, lit: false, image: None })
     }
 
     #[test]

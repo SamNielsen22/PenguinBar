@@ -9,12 +9,17 @@ use crate::input;
 use crate::layout::{Action, Item, Key, Layout};
 use crate::media::{self, NowPlaying};
 use crate::render::{keys, media as scrubber, Canvas};
-use crate::state;
+use crate::state::{self, Window, Workspaces};
 use crate::transport::drm::DrmDisplay;
 use crate::transport::Display;
 
 // The bar reports every 16 ms while touched, so this much silence means the finger lifted.
 const LIFT_AFTER: Duration = Duration::from_millis(80);
+// How often the active workspace's preview is refreshed, how often all of
+// them are, and the delay after a switch for the animation to finish.
+const PREVIEW_ACTIVE_EVERY: Duration = Duration::from_secs(2);
+const PREVIEW_ALL_EVERY: Duration = Duration::from_secs(20);
+const PREVIEW_AFTER_SWITCH: Duration = Duration::from_millis(400);
 
 // Everything the daemon reacts to. Each source runs on its own thread
 // and sends into the one channel the daemon reads.
@@ -22,13 +27,15 @@ const LIFT_AFTER: Duration = Duration::from_millis(80);
 pub enum Event {
     // A finger on the bar: 0.0 at the left edge, 1.0 at the right.
     Touch(f64),
-    // The finger lifted. The bar does not say so; the daemon sends this
-    // itself when the touches stop.
+    // The finger lifted. Sent by the daemon when the touches stop.
     Release,
-    // Another window took focus. This is its class, like "firefox".
-    Focus(String),
+    // Another window took focus, or the focused window's title changed.
+    Focus(Window),
     // What the music or video player is doing, or None when nothing plays.
     Media(Option<NowPlaying>),
+    Workspaces(Workspaces),
+    // A small screenshot of a workspace, as PNG.
+    Preview(i32, Vec<u8>),
     ConfigChanged,
 }
 
@@ -43,14 +50,17 @@ pub fn run() -> anyhow::Result<()> {
     input::spawn_reader(input::find_touch_device()?, tx.clone())?;
     state::spawn_watcher(tx.clone())?;
     media::spawn_watcher(tx.clone());
-    let _watcher = watch_config(tx)?;
+    let _watcher = watch_config(tx.clone())?;
 
-    let mut class = String::new();
+    let mut window = Window::default();
     let mut expanded = false;
     let mut now: Option<NowPlaying> = None;
+    let mut workspaces = Workspaces::default();
+    let mut next_preview = Instant::now() + PREVIEW_AFTER_SWITCH;
+    let mut next_preview_all = Instant::now() + PREVIEW_AFTER_SWITCH;
     // When `now`'s position was last set, so it can be moved on with time.
     let mut clock = Instant::now();
-    let mut layout = config.layout_for(&class, expanded, false);
+    let mut layout = config.layout_for(&window.class, expanded, false, &workspaces);
     let mut spans = keys::spans(&layout, width);
     let mut pressed = None;
     // Where along the media bar the finger is, while it is being dragged.
@@ -60,6 +70,15 @@ pub fn run() -> anyhow::Result<()> {
 
     loop {
         let mut redraw = false;
+        // Refresh the workspace previews.
+        if Instant::now() >= next_preview_all {
+            next_preview_all = Instant::now() + PREVIEW_ALL_EVERY;
+            next_preview = Instant::now() + PREVIEW_ACTIVE_EVERY;
+            state::spawn_previews(workspaces.all_shots(), tx.clone());
+        } else if Instant::now() >= next_preview {
+            next_preview = Instant::now() + PREVIEW_ACTIVE_EVERY;
+            state::spawn_previews(workspaces.active_shot(), tx.clone());
+        }
         let event = match rx.recv_timeout(LIFT_AFTER) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) if pressed.is_some() => Event::Release,
@@ -74,7 +93,7 @@ pub fn run() -> anyhow::Result<()> {
                     drag = None;
                     redraw = true;
                 }
-                // A finger on the media bar scrubs instead of pressing.
+                // A finger on the media bar scrubs.
                 if let Some(i) = next {
                     if layout.items().nth(i) == Some(&Item::Media) {
                         let (left, right) = spans[i];
@@ -110,15 +129,24 @@ pub fn run() -> anyhow::Result<()> {
                                 }
                             }
                         }
-                        None => {}
+                        _ => {}
                     }
                     redraw = true;
                 }
             }
-            Event::Focus(new_class) => class = new_class,
+            Event::Focus(focused) => window = focused,
             Event::Media(update) => {
                 now = reconcile(now, update, &mut clock);
                 redraw = true;
+            }
+            Event::Workspaces(mut update) => {
+                update.previews = std::mem::take(&mut workspaces.previews);
+                workspaces = update;
+                next_preview = Instant::now() + PREVIEW_AFTER_SWITCH;
+            }
+            Event::Preview(id, png) => {
+                tracing::debug!("preview of workspace {id}, {} bytes", png.len());
+                workspaces.previews.insert(id, png);
             }
             Event::ConfigChanged => match Config::load() {
                 Ok(new_config) => config = new_config,
@@ -127,16 +155,21 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         // Focus, the strip toggle, the player, or a config save may have changed what to show.
-        // Like Apple, the now-playing bar only shows in the player's own window.
+        // The now-playing bar only shows in the player's own window.
         let has_media = match &now {
-            Some(now) => now.is_app(&class),
+            Some(now) => now.is_window(&window),
             None => false,
         };
-        let wanted = config.layout_for(&class, expanded, has_media);
+        let wanted = config.layout_for(&window.class, expanded, has_media, &workspaces);
         if wanted != layout {
             layout = wanted;
-            spans = keys::spans(&layout, width);
-            pressed = None;
+            // A new preview picture changes the layout but not where the keys are,
+            // so a finger already on a key keeps its key.
+            let new_spans = keys::spans(&layout, width);
+            if new_spans != spans {
+                spans = new_spans;
+                pressed = None;
+            }
             redraw = true;
         }
         if redraw {
@@ -150,8 +183,8 @@ pub fn run() -> anyhow::Result<()> {
     }
 }
 
-// Takes the player's latest report. After a seek Firefox reports a position
-// and length of zero until the page says otherwise, so keep counting on our own.
+// Merges the player's latest report. A report of zero position and length
+// on the same track is stale, and the current count is kept instead.
 fn reconcile(ours: Option<NowPlaying>, theirs: Option<NowPlaying>, clock: &mut Instant) -> Option<NowPlaying> {
     let elapsed = clock.elapsed();
     *clock = Instant::now();
@@ -171,9 +204,8 @@ fn reconcile(ours: Option<NowPlaying>, theirs: Option<NowPlaying>, clock: &mut I
     }
 }
 
-// Jumps the player to a point along the track, 0.0 to 1.0, and shows it there
-// right away. The player is told on a thread, since a browser can take a
-// while to seek and the bar must keep following the finger meanwhile.
+// Jumps the player to a point along the track, 0.0 to 1.0. The bar shows
+// the new position at once; the player is told on a thread.
 fn seek(now: &mut Option<NowPlaying>, fraction: f64) {
     let target = match now {
         Some(now) => now.at(fraction),
@@ -198,6 +230,11 @@ fn tap(keyboard: &mut Keyboard, key: &Key, expanded: &mut bool) -> anyhow::Resul
             std::thread::spawn(move || child.wait());
         }
         Action::ToggleStrip => *expanded = !*expanded,
+        Action::Workspace(id) => {
+            if let Err(e) = state::switch_workspace(*id) {
+                tracing::warn!("workspace: {e:#}");
+            }
+        }
     }
     Ok(())
 }

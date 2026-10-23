@@ -14,6 +14,7 @@ evdev = "0.13.2"
 mpris = "2.1.0"
 notify = "8.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

@@ -5,22 +5,28 @@ use anyhow::Context;
 use mpris::{PlaybackStatus, Player, PlayerFinder};
 
 use crate::daemon::Event;
+use crate::state::Window;
 
 // What the active player is doing. Position is whole seconds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NowPlaying {
     // The player's app name, like "firefox" or "spotify".
     pub app: String,
+    // The track or video title, as the player reports it.
+    pub title: String,
     pub playing: bool,
     pub position: Duration,
     pub length: Duration,
 }
 
 impl NowPlaying {
-    // Whether this player is the focused window, given its class.
-    pub fn is_app(&self, class: &str) -> bool {
-        let class = class.to_lowercase();
-        class.contains(&self.app) || self.app.contains(&class)
+    // Whether the focused window is where this is playing: the player's app,
+    // and a window title that mentions the track, so a browser only counts
+    // on the tab with the video.
+    pub fn is_window(&self, window: &Window) -> bool {
+        let class = window.class.to_lowercase();
+        let same_app = class.contains(&self.app) || self.app.contains(&class);
+        same_app && (self.title.is_empty() || window.title.contains(&self.title))
     }
 
     // The same track at a point along it, 0.0 to 1.0.
@@ -46,12 +52,13 @@ fn now_playing(player: &Player) -> anyhow::Result<Option<NowPlaying>> {
         None => player.bus_name_trimmed().to_string(),
     };
     let position = Duration::from_secs(player.get_position()?.as_secs());
-    let length = player.get_metadata()?.length().unwrap_or_default();
+    let metadata = player.get_metadata()?;
     Ok(Some(NowPlaying {
         app: app.to_lowercase(),
+        title: metadata.title().unwrap_or_default().to_string(),
         playing: status == PlaybackStatus::Playing,
         position,
-        length,
+        length: metadata.length().unwrap_or_default(),
     }))
 }
 
@@ -86,4 +93,29 @@ pub fn seek_to(position: Duration) -> anyhow::Result<()> {
     // SetPosition is the absolute seek. Browsers only forward this one to the page.
     player.set_position(track, &position)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plays_only_in_the_window_that_shows_the_track() {
+        let now = NowPlaying {
+            app: "firefox".to_string(),
+            title: "Some Video".to_string(),
+            playing: true,
+            position: Duration::ZERO,
+            length: Duration::from_secs(60),
+        };
+        let video = Window { class: "firefox".to_string(), title: "Some Video - YouTube — Mozilla Firefox".to_string() };
+        let other_tab = Window { class: "firefox".to_string(), title: "New Tab — Mozilla Firefox".to_string() };
+        let terminal = Window { class: "kitty".to_string(), title: "Some Video".to_string() };
+        assert!(now.is_window(&video));
+        assert!(!now.is_window(&other_tab));
+        assert!(!now.is_window(&terminal));
+
+        let untitled = NowPlaying { title: String::new(), ..now };
+        assert!(untitled.is_window(&other_tab));
+    }
 }

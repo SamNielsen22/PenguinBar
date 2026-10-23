@@ -6,6 +6,7 @@ use evdev::KeyCode;
 use serde::Deserialize;
 
 use crate::layout::{Action, Groups, Item, Key, Layout};
+use crate::state::Workspaces;
 
 // The example config is also the built-in default.
 const BUILTIN: &str = include_str!("../examples/magicbar.toml");
@@ -79,9 +80,9 @@ impl Config {
         Self::parse(&text).with_context(|| format!("in {}", path.display()))
     }
 
-    // The bar to show for a window class. Like Apple's: esc, then the app's
-    // keys, then the Control Strip. Expanded, the full strip covers the app's keys.
-    pub fn layout_for(&self, class: &str, expanded: bool, has_media: bool) -> Layout {
+    // The bar for a window class: esc, the app's keys, then the Control Strip.
+    // Expanded, the full strip takes the place of the app's keys.
+    pub fn layout_for(&self, class: &str, expanded: bool, has_media: bool, workspaces: &Workspaces) -> Layout {
         let mut groups = vec![vec![Item::Key(self.esc.clone())]];
         let mut strip = Vec::new();
         if expanded {
@@ -93,13 +94,8 @@ impl Config {
             strip.push(toggle("\u{f104}"));
             strip.extend(self.strip.collapsed.clone());
         }
-        // The now-playing widget only shows while something is playing.
-        if !has_media {
-            for group in &mut groups {
-                group.retain(|item| *item != Item::Media);
-            }
-            groups.retain(|group| !group.is_empty());
-        }
+        let mut groups: Groups = groups.into_iter().map(|group| fill_widgets(group, has_media, workspaces)).collect();
+        groups.retain(|group| !group.is_empty());
         Layout { groups, strip }
     }
 
@@ -109,9 +105,9 @@ impl Config {
         let esc = match file.esc {
             Some(item) => match parse_item(item)? {
                 Item::Key(key) => key,
-                Item::Media => anyhow::bail!("esc must be a key"),
+                _ => anyhow::bail!("esc must be a key"),
             },
-            None => Key { label: "esc".to_string(), action: Action::Key(KeyCode::KEY_ESC) },
+            None => Key { label: "esc".to_string(), action: Action::Key(KeyCode::KEY_ESC), lit: false, image: None },
         };
         let mut collapsed = Vec::new();
         for item in file.strip.collapsed {
@@ -136,7 +132,31 @@ impl Config {
 }
 
 fn toggle(label: &str) -> Item {
-    Item::Key(Key { label: label.to_string(), action: Action::ToggleStrip })
+    Item::Key(Key { label: label.to_string(), action: Action::ToggleStrip, lit: false, image: None })
+}
+
+// Turns the widgets in a group into what they show right now: the media
+// widget only while something is playing, and one key per workspace.
+fn fill_widgets(group: Vec<Item>, has_media: bool, workspaces: &Workspaces) -> Vec<Item> {
+    let mut out = Vec::new();
+    for item in group {
+        match item {
+            Item::Media if !has_media => {}
+            // A workspace key is its picture, or blank until there is one.
+            Item::Workspaces => {
+                for id in &workspaces.ids {
+                    out.push(Item::Key(Key {
+                        label: String::new(),
+                        action: Action::Workspace(*id),
+                        lit: *id == workspaces.active,
+                        image: workspaces.previews.get(id).cloned(),
+                    }));
+                }
+            }
+            item => out.push(item),
+        }
+    }
+    out
 }
 
 fn parse_groups(groups: Vec<Vec<ItemFile>>) -> anyhow::Result<Groups> {
@@ -154,7 +174,8 @@ fn parse_groups(groups: Vec<Vec<ItemFile>>) -> anyhow::Result<Groups> {
 fn parse_item(item: ItemFile) -> anyhow::Result<Item> {
     match item.widget.as_deref() {
         Some("media") => return Ok(Item::Media),
-        Some(other) => anyhow::bail!("unknown widget {other}. The only widget is media"),
+        Some("workspaces") => return Ok(Item::Workspaces),
+        Some(other) => anyhow::bail!("unknown widget {other}. The widgets are media and workspaces"),
         None => {}
     }
     let label = item.label.context("a key needs a label")?;
@@ -168,7 +189,7 @@ fn parse_item(item: ItemFile) -> anyhow::Result<Item> {
         (None, Some(command)) => Action::Command(command),
         _ => anyhow::bail!("\"{label}\" needs either key or command, not both or neither"),
     };
-    Ok(Item::Key(Key { label, action }))
+    Ok(Item::Key(Key { label, action, lit: false, image: None }))
 }
 
 #[cfg(test)]
@@ -182,8 +203,12 @@ mod tests {
     fn action(item: &Item) -> &Action {
         match item {
             Item::Key(key) => &key.action,
-            Item::Media => panic!("expected a key, got the media widget"),
+            other => panic!("expected a key, got {other:?}"),
         }
+    }
+
+    fn three_workspaces() -> Workspaces {
+        Workspaces { ids: vec![1, 2, 3], active: 2, ..Default::default() }
     }
 
     #[test]
@@ -194,9 +219,9 @@ mod tests {
     #[test]
     fn an_unknown_app_gets_esc_the_default_groups_and_the_strip() {
         let config = Config::parse(BUILTIN).unwrap();
-        let layout = config.layout_for("kitty", false, true);
+        let layout = config.layout_for("kitty", false, true, &three_workspaces());
         assert_eq!(action(&layout.groups[0][0]), &Action::Key(KeyCode::KEY_ESC));
-        assert_eq!(layout.groups[1][0], Item::Media);
+        assert_eq!(layout.groups[2][0], Item::Media);
         assert_eq!(action(&layout.strip[0]), &Action::ToggleStrip);
         assert_eq!(layout.strip.len(), 5);
     }
@@ -204,7 +229,7 @@ mod tests {
     #[test]
     fn a_known_app_gets_its_keys_in_the_middle() {
         let config = Config::parse(BUILTIN).unwrap();
-        let layout = config.layout_for("firefox", false, false);
+        let layout = config.layout_for("firefox", false, false, &three_workspaces());
         assert_eq!(action(&layout.groups[1][0]), &Action::Key(KeyCode::KEY_BACK));
         assert_eq!(layout.strip.len(), 5);
     }
@@ -212,7 +237,7 @@ mod tests {
     #[test]
     fn the_expanded_strip_replaces_the_app_keys() {
         let config = Config::parse(BUILTIN).unwrap();
-        let layout = config.layout_for("firefox", true, false);
+        let layout = config.layout_for("firefox", true, false, &three_workspaces());
         assert_eq!(action(&layout.groups[0][0]), &Action::Key(KeyCode::KEY_ESC));
         assert_eq!(action(&layout.groups[1][0]), &Action::ToggleStrip);
         assert!(layout.items().all(|item| action(item) != &Action::Key(KeyCode::KEY_BACK)));
@@ -222,10 +247,25 @@ mod tests {
     #[test]
     fn the_media_widget_hides_when_nothing_is_playing() {
         let config = Config::parse(BUILTIN).unwrap();
-        let shown = config.layout_for("firefox", false, true);
-        let hidden = config.layout_for("firefox", false, false);
+        let shown = config.layout_for("firefox", false, true, &three_workspaces());
+        let hidden = config.layout_for("firefox", false, false, &three_workspaces());
         assert!(shown.items().any(|item| *item == Item::Media));
         assert!(hidden.items().all(|item| *item != Item::Media));
+    }
+
+    #[test]
+    fn the_workspace_widget_becomes_one_lit_key_per_workspace() {
+        let config = Config::parse(BUILTIN).unwrap();
+        let layout = config.layout_for("kitty", false, false, &three_workspaces());
+        let keys: Vec<&Key> = layout.groups[1].iter().filter_map(|item| match item {
+            Item::Key(key) => Some(key),
+            _ => None,
+        }).collect();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[1].action, Action::Workspace(2));
+        assert!(keys[1].lit && !keys[0].lit && !keys[2].lit);
+        let none = config.layout_for("kitty", false, false, &Workspaces::default());
+        assert_eq!(none.groups.len(), 1);
     }
 
     #[test]

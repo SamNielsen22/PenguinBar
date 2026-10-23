@@ -13,7 +13,7 @@ pub const TEXT_FONT: &str = "sans-serif";
 
 pub type Rgb = (f64, f64, f64);
 
-// Apple's palette: a black bar, grey plates, white labels.
+// Colours: a black bar, grey plates, white labels.
 pub const BLACK: Rgb = (0.0, 0.0, 0.0);
 pub const PLATE: Rgb = (0.22, 0.22, 0.22);
 pub const PLATE_PRESSED: Rgb = (0.45, 0.45, 0.45);

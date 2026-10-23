@@ -5,15 +5,18 @@ use super::{BLACK, DIVIDER, DIVIDER_WIDTH, FONT, INSET, LABEL, PLATE, PLATE_PRES
 use crate::layout::{Action, Item, Key, Layout};
 use crate::media::NowPlaying;
 
-// Sizes measured from Apple's Touch Bar, in pixels on the 2170 x 60 panel.
+// Sizes in pixels on the 2170 x 60 panel.
 const MARGIN: f64 = 40.0;
 const RIGHT_MARGIN: f64 = 16.0;
 const KEY_WIDTH: f64 = 136.0;
 const TOGGLE_WIDTH: f64 = 36.0;
+// A workspace key is as wide as a 16:10 screen scaled to the bar.
+const PREVIEW_WIDTH: f64 = 92.0;
 const GROUP_GAP: f64 = 24.0;
 const ICON_SIZE: f64 = 32.0;
 const TOGGLE_SIZE: f64 = 48.0;
 const TEXT_SIZE: f64 = 32.0;
+const OUTLINE: f64 = 3.0;
 
 // Each item's left and right edge in pixels, in layout order.
 pub type Spans = Vec<(f64, f64)>;
@@ -72,6 +75,7 @@ fn is_toggle(item: &Item) -> bool {
 fn width_of(item: &Item, media_width: f64) -> f64 {
     match item {
         Item::Media => media_width,
+        Item::Key(key) if matches!(key.action, Action::Workspace(_)) => PREVIEW_WIDTH,
         _ if is_toggle(item) => TOGGLE_WIDTH,
         _ => KEY_WIDTH,
     }
@@ -96,8 +100,7 @@ pub fn draw_row(
             }
             let left = spans[i].0;
             let right = spans[i + plate.len() - 1].1;
-            // The close button stands alone as a bare glyph, like Apple's,
-            // and the media widget draws its own plates.
+            // The close button is a bare glyph, and the media widget draws its own plate.
             let bare = plate.len() == 1 && (is_toggle(&plate[0]) || plate[0] == Item::Media);
             if !bare {
                 colour(cr, PLATE);
@@ -114,21 +117,39 @@ pub fn draw_row(
                 }
                 match item {
                     Item::Key(key) => {
+                        rounded_rect(cr, left, right, height);
+                        cr.clip();
                         if pressed == Some(i) {
-                            rounded_rect(cr, left, right, height);
-                            cr.clip();
                             colour(cr, PLATE_PRESSED);
                             cr.rectangle(l, INSET, r - l, height - 2.0 * INSET);
                             cr.fill()?;
-                            cr.reset_clip();
                         }
-                        label(cr, key, (l + r) / 2.0, height / 2.0)?;
+                        match &key.image {
+                            Some(png) => image(cr, png, l, r, height)?,
+                            // A workspace key is black until it has a picture.
+                            None if matches!(key.action, Action::Workspace(_)) => {
+                                colour(cr, BLACK);
+                                cr.rectangle(l, INSET, r - l, height - 2.0 * INSET);
+                                cr.fill()?;
+                            }
+                            None => label(cr, key, (l + r) / 2.0, height / 2.0)?,
+                        }
+                        // A lit key gets a white outline.
+                        if key.lit {
+                            colour(cr, LABEL);
+                            cr.set_line_width(OUTLINE);
+                            cr.rectangle(l + OUTLINE / 2.0, INSET + OUTLINE / 2.0, r - l - OUTLINE, height - 2.0 * INSET - OUTLINE);
+                            cr.stroke()?;
+                        }
+                        cr.reset_clip();
                     }
                     Item::Media => {
                         if let Some(now) = now {
                             media::draw(cr, l, r - l, height, now)?;
                         }
                     }
+                    // Replaced by keys before drawing.
+                    Item::Workspaces => {}
                 }
                 i += 1;
             }
@@ -139,6 +160,22 @@ pub fn draw_row(
 
 pub fn key_at(spans: &Spans, x: f64) -> Option<usize> {
     spans.iter().position(|&(left, right)| x >= left && x < right)
+}
+
+// Draws a PNG scaled to fit inside the key, centred.
+fn image(cr: &Context, png: &[u8], left: f64, right: f64, height: f64) -> anyhow::Result<()> {
+    let surface = cairo::ImageSurface::create_from_png(&mut std::io::Cursor::new(png))?;
+    let (w, h) = (surface.width() as f64, surface.height() as f64);
+    let scale = ((right - left) / w).min((height - 2.0 * INSET) / h);
+    let x = (left + right) / 2.0 - w * scale / 2.0;
+    let y = height / 2.0 - h * scale / 2.0;
+    cr.save()?;
+    cr.translate(x, y);
+    cr.scale(scale, scale);
+    cr.set_source_surface(&surface, 0.0, 0.0)?;
+    cr.paint()?;
+    cr.restore()?;
+    Ok(())
 }
 
 fn label(cr: &Context, key: &Key, x: f64, y: f64) -> anyhow::Result<()> {
@@ -156,11 +193,11 @@ mod tests {
     use std::time::Duration;
 
     fn key(label: &str) -> Item {
-        Item::Key(Key { label: label.to_string(), action: Action::Command(String::new()) })
+        Item::Key(Key { label: label.to_string(), action: Action::Command(String::new()), lit: false, image: None })
     }
 
     fn toggle() -> Item {
-        Item::Key(Key { label: "<".to_string(), action: Action::ToggleStrip })
+        Item::Key(Key { label: "<".to_string(), action: Action::ToggleStrip, lit: false, image: None })
     }
 
     #[test]
@@ -208,12 +245,21 @@ mod tests {
 
     #[test]
     fn every_state_draws_without_error() {
+        let mut lit = key("2");
+        if let Item::Key(key) = &mut lit {
+            key.lit = true;
+            // A 1x1 PNG, to exercise the image path.
+            let mut png = Vec::new();
+            cairo::ImageSurface::create(cairo::Format::Rgb24, 1, 1).unwrap().write_to_png(&mut png).unwrap();
+            key.image = Some(png);
+        }
         let layout = Layout {
-            groups: vec![vec![key("esc")], vec![toggle()], vec![key("\u{f05a8}"), key("b")], vec![Item::Media]],
+            groups: vec![vec![key("esc")], vec![toggle()], vec![key("1"), lit], vec![Item::Media]],
             strip: vec![toggle(), key("c")],
         };
         let now = NowPlaying {
             app: "firefox".to_string(),
+            title: String::new(),
             playing: true,
             position: Duration::from_secs(64),
             length: Duration::from_secs(210),

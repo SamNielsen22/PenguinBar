@@ -18,6 +18,7 @@ use evdev::KeyCode;
 use actions::Keyboard;
 use config::Config;
 use media::NowPlaying;
+use state::Workspaces;
 use render::{keys, Canvas, Rgb};
 use transport::Display;
 
@@ -86,10 +87,12 @@ fn main() -> anyhow::Result<()> {
             canvas.text(&text, 28.0, FG)
         }),
         Command::Row { class, expanded, playing } => {
-            let layout = Config::load()?.layout_for(&class, expanded, playing);
+            let workspaces = Workspaces { ids: vec![1, 2, 3], active: 1, ..Default::default() };
+            let layout = Config::load()?.layout_for(&class, expanded, playing, &workspaces);
             let now = if playing {
                 Some(NowPlaying {
                     app: class.clone(),
+                    title: String::new(),
                     playing: true,
                     position: Duration::from_secs(64),
                     length: Duration::from_secs(210),

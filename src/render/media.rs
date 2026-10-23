@@ -2,15 +2,14 @@ use std::time::Duration;
 
 use cairo::Context;
 
-use super::{centred_text, colour, rounded_rect, Rgb, FONT, LABEL, PLATE, TEXT_FONT};
+use super::{centred_text, colour, rounded_rect, Rgb, DIVIDER, DIVIDER_WIDTH, FONT, INSET, LABEL, PLATE, TEXT_FONT};
 use crate::media::NowPlaying;
 
-// Apple's now-playing bar: a play or pause button, then a plate with the
-// time played, a bar you can drag, and the time left. It is as wide as
-// the keys around it allow, and never narrower than this.
+// The now-playing bar on one plate: a play or pause button, the time
+// played, a bar you can drag, and the time left. It is as wide as the keys
+// around it allow, and never narrower than this.
 pub const MIN_WIDTH: f64 = 500.0;
 const BUTTON: f64 = 136.0;
-const GAP: f64 = 24.0;
 const TIME: f64 = 110.0;
 const BAR_HEIGHT: f64 = 4.0;
 const PLAYHEAD_HEIGHT: f64 = 32.0;
@@ -27,7 +26,7 @@ pub enum Hit {
 
 // x is measured from the widget's left edge.
 pub fn hit(x: f64, width: f64) -> Hit {
-    if x < BUTTON + GAP {
+    if x < BUTTON {
         return Hit::Button;
     }
     let (start, end) = bar(width);
@@ -36,24 +35,26 @@ pub fn hit(x: f64, width: f64) -> Hit {
 
 // The bar's start and end, from the widget's left edge.
 fn bar(width: f64) -> (f64, f64) {
-    (BUTTON + GAP + TIME, width - TIME)
+    (BUTTON + TIME, width - TIME)
 }
 
 pub fn draw(cr: &Context, left: f64, width: f64, height: f64, now: &NowPlaying) -> anyhow::Result<()> {
     let mid = height / 2.0;
 
-    // The button shows what a tap would do: pause while playing, play while paused.
     colour(cr, PLATE);
-    rounded_rect(cr, left, left + BUTTON, height);
+    rounded_rect(cr, left, left + width, height);
     cr.fill()?;
-    rounded_rect(cr, left + BUTTON + GAP, left + width, height);
+    colour(cr, DIVIDER);
+    cr.rectangle(left + BUTTON, INSET, DIVIDER_WIDTH, height - 2.0 * INSET);
     cr.fill()?;
+
+    // The button shows what a tap would do: pause while playing, play while paused.
     let icon = if now.playing { "\u{f03e4}" } else { "\u{f040a}" };
     colour(cr, LABEL);
     centred_text(cr, FONT, ICON_SIZE, icon, left + BUTTON / 2.0, mid)?;
 
     let left_over = now.length.saturating_sub(now.position);
-    centred_text(cr, TEXT_FONT, TEXT_SIZE, &clock(now.position), left + BUTTON + GAP + TIME / 2.0, mid)?;
+    centred_text(cr, TEXT_FONT, TEXT_SIZE, &clock(now.position), left + BUTTON + TIME / 2.0, mid)?;
     centred_text(cr, TEXT_FONT, TEXT_SIZE, &format!("-{}", clock(left_over)), left + width - TIME / 2.0, mid)?;
 
     let (start, end) = bar(width);
