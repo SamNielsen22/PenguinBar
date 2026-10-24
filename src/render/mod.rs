@@ -1,5 +1,6 @@
 pub mod keys;
 pub mod media;
+pub mod slider;
 
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::fs::File;

@@ -5,6 +5,7 @@ mod input;
 mod layout;
 mod media;
 mod render;
+mod sliders;
 mod state;
 mod transport;
 
@@ -17,8 +18,8 @@ use evdev::KeyCode;
 
 use actions::Keyboard;
 use config::Config;
+use layout::{Item, Slider};
 use media::NowPlaying;
-use state::Workspaces;
 use render::{keys, Canvas, Rgb};
 use transport::Display;
 
@@ -56,6 +57,9 @@ enum Command {
         /// Pretend a track is playing, to see the media widget
         #[arg(long)]
         playing: bool,
+        /// Show an open slider instead of the app's keys
+        #[arg(long)]
+        slider: bool,
     },
     Touch,
     /// Print what the music or video player is doing
@@ -86,9 +90,9 @@ fn main() -> anyhow::Result<()> {
             canvas.fill(BG)?;
             canvas.text(&text, 28.0, FG)
         }),
-        Command::Row { class, expanded, playing } => {
-            let workspaces = Workspaces { ids: vec![1, 2, 3], active: 1, ..Default::default() };
-            let layout = Config::load()?.layout_for(&class, expanded, playing, &workspaces);
+        Command::Row { class, expanded, playing, slider } => {
+            let open = if slider { Some(Item::Slider { kind: Slider::Brightness, value: 0.6, left: 1200.0 }) } else { None };
+            let layout = Config::load()?.layout_for(&class, expanded, playing, open);
             let now = if playing {
                 Some(NowPlaying {
                     app: class.clone(),
