@@ -464,24 +464,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "magicbar"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cairo-rs",
- "clap",
- "drm",
- "evdev",
- "mpris",
- "notify",
- "serde",
- "serde_json",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -578,6 +560,24 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "penguinbar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cairo-rs",
+ "clap",
+ "drm",
+ "evdev",
+ "mpris",
+ "notify",
+ "serde",
+ "serde_json",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "pin-project-lite"

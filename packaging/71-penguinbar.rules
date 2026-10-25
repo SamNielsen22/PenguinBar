@@ -1,0 +1,8 @@
+# Lets the logged-in user read touches from the Touch Bar and type through
+# the virtual keyboard.
+KERNEL=="hidraw*", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="8600", TAG+="uaccess"
+KERNEL=="uinput", OPTIONS+="static_node=uinput", TAG+="uaccess"
+
+# Keeps the compositor off the Touch Bar's DRM card, so penguinbar can draw on
+# it, and lets members of the video group open it.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="appletbdrm", ENV{ID_SEAT}="seat-touchbar", TAG-="seat", TAG-="master-of-seat", TAG-="uaccess", GROUP="video", MODE="0660"

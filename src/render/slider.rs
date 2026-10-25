@@ -2,36 +2,30 @@ use std::f64::consts::TAU;
 
 use cairo::Context;
 
-use super::{centred_text, colour, Rgb, FONT, LABEL};
+use super::{centred_text, colour, ACCENT, FONT, LABEL, TRACK};
 use crate::layout::Slider;
 
-// A slider drawn straight on the bar: the low icon on the left, the high
-// icon on the right, and a thin track between them filled up to a round knob.
 pub const WIDTH: f64 = 670.0;
 const ICON: f64 = 64.0;
 const ICON_SIZE: f64 = 28.0;
 const TRACK_HEIGHT: f64 = 4.0;
 const KNOB: f64 = 11.0;
-const TRACK: Rgb = (0.35, 0.35, 0.35);
 
-// How far along the track x is, 0.0 to 1.0. x is measured from the slider's left edge.
+// x is from the slider's left edge.
 pub fn hit(x: f64) -> f64 {
     let (start, end) = track();
     ((x - start) / (end - start)).clamp(0.0, 1.0)
 }
 
-// Where the knob sits for a level, from the slider's left edge.
 pub fn knob_at(value: f64) -> f64 {
     let (start, end) = track();
     start + (end - start) * value.clamp(0.0, 1.0)
 }
 
-// The track's start and end, from the slider's left edge.
 fn track() -> (f64, f64) {
     (ICON + KNOB, WIDTH - ICON - KNOB)
 }
 
-// The icons at the low and high ends.
 fn icons(kind: Slider) -> (&'static str, &'static str) {
     match kind {
         Slider::Brightness => ("\u{f0599}", "\u{f05a8}"),
@@ -53,7 +47,7 @@ pub fn draw(cr: &Context, left: f64, height: f64, kind: Slider, value: f64) -> a
     colour(cr, TRACK);
     cr.rectangle(start, mid - TRACK_HEIGHT / 2.0, end - start, TRACK_HEIGHT);
     cr.fill()?;
-    colour(cr, LABEL);
+    colour(cr, ACCENT);
     cr.rectangle(start, mid - TRACK_HEIGHT / 2.0, knob - start, TRACK_HEIGHT);
     cr.fill()?;
     cr.arc(knob, mid, KNOB, 0.0, TAU);

@@ -1,17 +1,14 @@
 use evdev::KeyCode;
 
-// What happens when a key is tapped.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    Key(KeyCode),
+    // Pressed together, in order.
+    Key(Vec<KeyCode>),
     Command(String),
-    // Opens or closes the Control Strip.
     ToggleStrip,
-    // Tap to open a slider, or hold and slide.
     Slider(Slider),
 }
 
-// A level the bar can set.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Slider {
     Brightness,
@@ -25,8 +22,7 @@ pub struct Key {
     pub action: Action,
 }
 
-// One slot in the bar: a key, the now-playing widget, or an open slider
-// showing a level from 0.0 to 1.0, with its left edge at `left` pixels.
+// Slider value is 0.0 to 1.0, left is in pixels.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     Key(Key),
@@ -34,11 +30,9 @@ pub enum Item {
     Slider { kind: Slider, value: f64, left: f64 },
 }
 
-// Items in a group share one plate, with thin dividers between them.
 pub type Groups = Vec<Vec<Item>>;
 
-// Groups run from the left edge. The strip is the Control Strip,
-// which hugs the right edge. It is empty while the strip is expanded.
+// strip is the Control Strip on the right. Empty when expanded.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
     pub groups: Groups,
@@ -46,13 +40,11 @@ pub struct Layout {
 }
 
 impl Layout {
-    // Every plate in order: each group, then the strip.
     pub fn plates(&self) -> impl Iterator<Item = &[Item]> {
         let groups = self.groups.iter().map(Vec::as_slice);
         groups.chain(std::iter::once(self.strip.as_slice()))
     }
 
-    // All items left to right.
     pub fn items(&self) -> impl Iterator<Item = &Item> {
         self.plates().flatten()
     }
@@ -63,7 +55,10 @@ mod tests {
     use super::*;
 
     fn key(label: &str) -> Item {
-        Item::Key(Key { label: label.to_string(), action: Action::ToggleStrip })
+        Item::Key(Key {
+            label: label.to_string(),
+            action: Action::ToggleStrip,
+        })
     }
 
     #[test]

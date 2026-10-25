@@ -14,22 +14,18 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use evdev::KeyCode;
 
 use actions::Keyboard;
 use config::Config;
 use layout::{Item, Slider};
 use media::NowPlaying;
-use render::{keys, Canvas, Rgb};
+use render::{keys, Canvas};
 use transport::Display;
 
-// Used for --png, where there is no hardware to ask.
 const PANEL: (u32, u32) = (2170, 60);
-const BG: Rgb = (0.0, 0.0, 0.0);
-const FG: Rgb = (1.0, 1.0, 1.0);
 
 #[derive(Parser)]
-#[command(name = "magicbar", about = "App-aware Touch Bar daemon for Linux")]
+#[command(name = "penguinbar", about = "App-aware Touch Bar daemon for Linux")]
 struct Cli {
     /// Print debug output
     #[arg(short, long)]
@@ -43,9 +39,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the daemon
+    Run,
+    /// Print the Touch Bar's DRM card, connector and mode
     Info,
-    Fill { colour: String },
-    Text { text: String },
     /// Draw the bar as an app would see it
     Row {
         /// Window class, like firefox. Leave empty for a bar with no app keys
@@ -61,37 +58,41 @@ enum Command {
         #[arg(long)]
         slider: bool,
     },
+    /// Print touches on the bar as they happen
     Touch,
-    /// Print what the music or video player is doing
-    Media {
-        /// Toggle play and pause first
-        #[arg(long)]
-        play_pause: bool,
-        /// Jump to this many seconds into the track first
-        #[arg(long)]
-        seek: Option<u64>,
-    },
+    /// Print what the music and video players are doing
+    Media,
+    /// Press a key on the virtual keyboard, like KEY_VOLUMEUP or KEY_LEFTCTRL+KEY_C
     Key { name: String },
-    Run,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let level = if cli.verbose { tracing::Level::DEBUG } else { tracing::Level::INFO };
+    let level = if cli.verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
     tracing_subscriber::fmt().with_max_level(level).init();
 
     match cli.command {
+        Command::Run => daemon::run(),
         Command::Info => transport::drm::info(),
-        Command::Fill { colour } => {
-            let colour = parse_colour(&colour)?;
-            show(cli.png, |canvas| canvas.fill(colour))
-        }
-        Command::Text { text } => show(cli.png, |canvas| {
-            canvas.fill(BG)?;
-            canvas.text(&text, 28.0, FG)
-        }),
-        Command::Row { class, expanded, playing, slider } => {
-            let open = if slider { Some(Item::Slider { kind: Slider::Brightness, value: 0.6, left: 1200.0 }) } else { None };
+        Command::Row {
+            class,
+            expanded,
+            playing,
+            slider,
+        } => {
+            let open = if slider {
+                Some(Item::Slider {
+                    kind: Slider::Brightness,
+                    value: 0.6,
+                    left: 1200.0,
+                })
+            } else {
+                None
+            };
             let layout = Config::load()?.layout_for(&class, expanded, playing, open);
             let now = if playing {
                 Some(NowPlaying {
@@ -104,7 +105,9 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            show(cli.png, |canvas| keys::draw_row(canvas, &layout, None, now.as_ref()))
+            show(cli.png, |canvas| {
+                keys::draw_row(canvas, &layout, None, now.as_ref())
+            })
         }
         Command::Touch => {
             let (tx, rx) = mpsc::channel();
@@ -115,32 +118,19 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::Media { play_pause, seek } => {
-            if play_pause {
-                media::play_pause()?;
-            }
-            if let Some(seconds) = seek {
-                media::seek_to(Duration::from_secs(seconds))?;
-            }
+        Command::Media => {
             let (tx, rx) = mpsc::channel();
             media::spawn_watcher(tx);
-            println!("watching the player. Ctrl-C to exit.");
+            println!("watching the players. Ctrl-C to exit.");
             for event in rx {
                 println!("{event:?}");
             }
             Ok(())
         }
-        Command::Key { name } => {
-            let key: KeyCode = name
-                .parse()
-                .map_err(|_| anyhow::anyhow!("unknown key {name}. Names look like KEY_ESC"))?;
-            Keyboard::new()?.tap(key)
-        }
-        Command::Run => daemon::run(),
+        Command::Key { name } => Keyboard::new()?.tap(&actions::parse_keys(&name)?),
     }
 }
 
-// Draw, then save a PNG or show it on the bar until Enter.
 fn show<F>(png: Option<PathBuf>, draw: F) -> anyhow::Result<()>
 where
     F: FnOnce(&mut Canvas) -> anyhow::Result<()>,
@@ -163,31 +153,4 @@ where
         std::io::stdin().read_line(&mut line)?;
     }
     Ok(())
-}
-
-fn parse_colour(s: &str) -> anyhow::Result<Rgb> {
-    let hex = s.trim_start_matches('#');
-    let n = match u32::from_str_radix(hex, 16) {
-        Ok(n) if hex.len() == 6 => n,
-        _ => anyhow::bail!("colour must look like #rrggbb, got {s}"),
-    };
-    let channel = |shift: u32| ((n >> shift) & 0xff) as f64 / 255.0;
-    Ok((channel(16), channel(8), channel(0)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_hex_colours() {
-        assert_eq!(parse_colour("#ff0000").unwrap(), (1.0, 0.0, 0.0));
-        assert_eq!(parse_colour("00ff00").unwrap(), (0.0, 1.0, 0.0));
-    }
-
-    #[test]
-    fn rejects_bad_colours() {
-        assert!(parse_colour("#ff00").is_err());
-        assert!(parse_colour("zz0000").is_err());
-    }
 }

@@ -1,0 +1,84 @@
+# penguinbar config. Copy to ~/.config/penguinbar/penguinbar.toml. Reloads when you save.
+#
+# esc on the left, the app's keys in the middle, the Control Strip on the right.
+# The chevron opens the strip, the x closes it.
+#
+# A key needs a label and one of:
+#   key     = "KEY_VOLUMEUP", or several joined with +, like "KEY_LEFTCTRL+KEY_C"
+#   command = "playerctl next"
+#   slider  = "brightness", "volume" or "keyboard". Tap to open, or hold and slide.
+# Labels can be text or Nerd Font icons. Keys in a group share one plate.
+#
+# { widget = "media" } is prev / play / next plus a scrubber. Appears while something plays.
+
+# Far left. Always.
+esc = { label = "esc", key = "KEY_ESC" }
+
+[strip]
+# Always on the right.
+collapsed = [
+    { label = "󰖨", slider = "brightness" },
+    { label = "󰕾", slider = "volume" },
+    { label = "󰌌", slider = "keyboard" },
+]
+# Shown when the strip is expanded.
+expanded = [
+    [
+        { label = "󰖙", key = "KEY_BRIGHTNESSDOWN" },
+        { label = "󰖨", key = "KEY_BRIGHTNESSUP" },
+    ],
+    [
+        { label = "󰌌 -", key = "KEY_KBDILLUMDOWN" },
+        { label = "󰌌 +", key = "KEY_KBDILLUMUP" },
+    ],
+    [
+        { label = "󰑟", key = "KEY_PREVIOUSSONG" },
+        { label = "󰐎", key = "KEY_PLAYPAUSE" },
+        { label = "󰈑", key = "KEY_NEXTSONG" },
+    ],
+    [
+        { label = "󰸈", key = "KEY_MUTE" },
+        { label = "󰕿", key = "KEY_VOLUMEDOWN" },
+        { label = "󰕾", key = "KEY_VOLUMEUP" },
+    ],
+    [{ label = "󰄀", command = "grim -g \"$(slurp -d)\" - | wl-copy" }],
+]
+
+# Shown for every app, before the app's own keys.
+[layouts.default]
+groups = [[{ widget = "media" }]]
+
+# Keys only this app gets. Class from: hyprctl activewindow
+[layouts.browser]
+apps = ["firefox", "chromium"]
+groups = [
+    [
+        { label = "󰁍", key = "KEY_BACK" },
+        { label = "󰁔", key = "KEY_FORWARD" },
+        { label = "󰑐", key = "KEY_REFRESH" },
+    ],
+    [{ widget = "media" }],
+]
+
+[layouts.terminal]
+apps = ["kitty"]
+groups = [
+    [
+        { label = "󰐕", key = "KEY_LEFTCTRL+KEY_LEFTSHIFT+KEY_T" },
+        { label = "󰅁", key = "KEY_LEFTCTRL+KEY_LEFTSHIFT+KEY_LEFT" },
+        { label = "󰅂", key = "KEY_LEFTCTRL+KEY_LEFTSHIFT+KEY_RIGHT" },
+        { label = "󰅖", key = "KEY_LEFTCTRL+KEY_LEFTSHIFT+KEY_Q" },
+    ],
+    [{ label = "clear", key = "KEY_LEFTCTRL+KEY_L" }],
+]
+
+[layouts.music]
+apps = ["spotify"]
+groups = [
+    [{ widget = "media" }],
+    [
+        { label = "󰒝", key = "KEY_LEFTCTRL+KEY_S" },
+        { label = "󰑖", key = "KEY_LEFTCTRL+KEY_R" },
+        { label = "󰋑", key = "KEY_LEFTALT+KEY_LEFTSHIFT+KEY_B" },
+    ],
+]

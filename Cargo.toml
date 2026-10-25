@@ -1,5 +1,5 @@
 [package]
-name = "magicbar"
+name = "penguinbar"
 version = "0.1.0"
 edition = "2021"
 description = "App-aware Touch Bar daemon for Linux"

@@ -1,0 +1,12 @@
+[Unit]
+Description=App-aware Touch Bar
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/penguinbar run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
