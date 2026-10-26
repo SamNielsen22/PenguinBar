@@ -116,7 +116,7 @@ impl Config {
         Layout { groups, strip }
     }
 
-    fn parse(text: &str) -> anyhow::Result<Config> {
+    pub fn parse(text: &str) -> anyhow::Result<Config> {
         let file: ConfigFile = toml::from_str(text)?;
 
         let esc = match file.esc {

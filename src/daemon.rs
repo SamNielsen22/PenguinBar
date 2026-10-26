@@ -3,12 +3,13 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use evdev::KeyCode;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::actions::Keyboard;
 use crate::config::Config;
 use crate::input;
-use crate::layout::{Action, Item, Key, Layout, Slider};
+use crate::layout::{Action, Item, Layout, Slider};
 use crate::media::{self, NowPlaying};
 use crate::render::{keys, media as scrubber, slider as slider_view, Canvas};
 use crate::sliders;
@@ -33,6 +34,16 @@ pub enum Event {
     // Every player that is playing or paused.
     Media(Vec<NowPlaying>),
     ConfigChanged,
+}
+
+// Something the bar wants done outside itself. The run loop does it.
+#[derive(Debug, PartialEq)]
+enum Effect {
+    Keys(Vec<KeyCode>),
+    Command(String),
+    SetLevel(Slider, f64),
+    PlayPause(String),
+    Seek(String, Duration),
 }
 
 struct Hold {
@@ -77,8 +88,10 @@ impl Open {
 
 struct Bar {
     config: Config,
-    keyboard: Keyboard,
     width: f64,
+    // Reads a slider's current level when a finger lands on its key.
+    read_level: fn(Slider) -> f64,
+    effects: Vec<Effect>,
     window: Window,
     expanded: bool,
     players: Vec<NowPlaying>,
@@ -98,7 +111,7 @@ struct Bar {
 
 pub fn run() -> anyhow::Result<()> {
     let config = Config::load()?;
-    let keyboard = Keyboard::new()?;
+    let mut keyboard = Keyboard::new()?;
     let mut display = DrmDisplay::open()?;
     let (width, _) = display.size();
 
@@ -108,7 +121,7 @@ pub fn run() -> anyhow::Result<()> {
     media::spawn_watcher(tx.clone());
     let _watcher = watch_config(tx)?;
 
-    let mut bar = Bar::new(config, keyboard, width as f64);
+    let mut bar = Bar::new(config, width as f64, read_level);
     bar.draw(&mut display)?;
     // Other events pulled out of the queue while skipping old touches.
     let mut pending = VecDeque::new();
@@ -116,39 +129,18 @@ pub fn run() -> anyhow::Result<()> {
     loop {
         let timed = bar.hold.is_some() || bar.open.is_some();
         let event = next_event(&rx, &mut pending, timed)?;
-        let mut changed = event.is_some();
-        let mut redraw = false;
-        match event {
-            Some(Event::Touch(x)) => redraw = bar.touch(x),
-            Some(Event::Release) => {
-                bar.release()?;
-                redraw = true;
-            }
-            Some(Event::Focus(window)) => {
-                bar.window = window;
-                bar.update_player();
-            }
-            Some(Event::Media(players)) => {
-                bar.players = players;
-                bar.update_player();
-                redraw = true;
-            }
-            Some(Event::ConfigChanged) => match Config::load() {
-                Ok(config) => bar.config = config,
-                Err(e) => tracing::error!("config not reloaded: {e:#}"),
-            },
-            None => {}
-        }
-        if bar.run_timers() {
-            changed = true;
-        }
-        if changed && bar.update_layout() {
-            redraw = true;
+        let redraw = bar.handle(event);
+        for effect in bar.effects.drain(..) {
+            perform(effect, &mut keyboard)?;
         }
         if redraw {
             bar.draw(&mut display)?;
         }
     }
+}
+
+fn read_level(kind: Slider) -> f64 {
+    sliders::get(kind).unwrap_or(0.5)
 }
 
 // Waits for the next event, or None when a slider's timer is due.
@@ -181,14 +173,46 @@ fn next_event(
     Ok(Some(event))
 }
 
+// Does what the bar asked for. Anything slow runs on a thread so the bar never waits.
+fn perform(effect: Effect, keyboard: &mut Keyboard) -> anyhow::Result<()> {
+    match effect {
+        Effect::Keys(keys) => keyboard.tap(&keys)?,
+        Effect::Command(command) => {
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .spawn()?;
+            // Reap it or it becomes a zombie.
+            std::thread::spawn(move || child.wait());
+        }
+        Effect::SetLevel(kind, value) => sliders::set(kind, value),
+        Effect::PlayPause(app) => {
+            std::thread::spawn(move || {
+                if let Err(e) = media::play_pause(&app) {
+                    tracing::warn!("media: {e:#}");
+                }
+            });
+        }
+        Effect::Seek(app, position) => {
+            std::thread::spawn(move || {
+                if let Err(e) = media::seek_to(&app, position) {
+                    tracing::warn!("media: {e:#}");
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
 impl Bar {
-    fn new(config: Config, keyboard: Keyboard, width: f64) -> Bar {
+    fn new(config: Config, width: f64, read_level: fn(Slider) -> f64) -> Bar {
         let layout = config.layout_for("", false, false, None);
         let spans = keys::spans(&layout, width);
         Bar {
             config,
-            keyboard,
             width,
+            read_level,
+            effects: Vec::new(),
             window: Window::default(),
             expanded: false,
             players: Vec::new(),
@@ -203,6 +227,40 @@ impl Bar {
             open: None,
             last_set: Instant::now(),
         }
+    }
+
+    // Reacts to one event, or to the timers when there is none. Returns whether to redraw.
+    fn handle(&mut self, event: Option<Event>) -> bool {
+        let mut changed = event.is_some();
+        let mut redraw = false;
+        match event {
+            Some(Event::Touch(x)) => redraw = self.touch(x),
+            Some(Event::Release) => {
+                self.release();
+                redraw = true;
+            }
+            Some(Event::Focus(window)) => {
+                self.window = window;
+                self.update_player();
+            }
+            Some(Event::Media(players)) => {
+                self.players = players;
+                self.update_player();
+                redraw = true;
+            }
+            Some(Event::ConfigChanged) => match Config::load() {
+                Ok(config) => self.config = config,
+                Err(e) => tracing::error!("config not reloaded: {e:#}"),
+            },
+            None => {}
+        }
+        if self.run_timers() {
+            changed = true;
+        }
+        if changed && self.update_layout() {
+            redraw = true;
+        }
+        redraw
     }
 
     // Returns whether the bar needs redrawing.
@@ -224,7 +282,7 @@ impl Bar {
                     kind,
                     since: Instant::now(),
                     start_x: x,
-                    start_value: sliders::get(kind).unwrap_or(0.5),
+                    start_value: (self.read_level)(kind),
                     sliding: false,
                 });
             }
@@ -235,7 +293,12 @@ impl Bar {
                 let slider = self
                     .open
                     .get_or_insert_with(|| hold.open(self.width, Instant::now()));
-                slide(slider, x * self.width, &mut self.last_set);
+                slide(
+                    slider,
+                    x * self.width,
+                    &mut self.last_set,
+                    &mut self.effects,
+                );
                 redraw = true;
             }
         }
@@ -243,7 +306,12 @@ impl Bar {
         // Dragging a slider that a tap opened.
         if let (Some(Item::Slider { .. }), Some(slider), None) = (&item, &mut self.open, &self.hold)
         {
-            slide(slider, x * self.width, &mut self.last_set);
+            slide(
+                slider,
+                x * self.width,
+                &mut self.last_set,
+                &mut self.effects,
+            );
             slider.until = Instant::now() + SLIDER_STAYS;
             redraw = true;
         }
@@ -258,52 +326,80 @@ impl Bar {
                 }
                 if self.last_set.elapsed() > SET_EVERY {
                     self.last_set = Instant::now();
-                    self.clock = Instant::now();
-                    seek(&mut self.now, fraction);
+                    self.seek(fraction);
                 }
             }
         }
         redraw
     }
 
-    fn release(&mut self) -> anyhow::Result<()> {
+    fn release(&mut self) {
         let pressed = self.pressed.take();
         if let Some(hold) = self.hold.take() {
             // Slide then lift closes it. A plain tap opens it.
             self.open = match (hold.sliding, self.open.take()) {
                 (true, Some(slider)) => {
-                    sliders::set(slider.kind, slider.value);
+                    self.effects
+                        .push(Effect::SetLevel(slider.kind, slider.value));
                     None
                 }
                 _ => Some(hold.open(self.width, Instant::now() + SLIDER_STAYS)),
             };
-            return Ok(());
+            return;
         }
         let i = match pressed {
             Some(i) => i,
-            None => return Ok(()),
+            None => return,
         };
-        match self.layout.items().nth(i).cloned() {
-            Some(Item::Key(key)) => tap(&mut self.keyboard, &key, &mut self.expanded)?,
+        let item = self.layout.items().nth(i).cloned();
+        match item {
+            Some(Item::Key(key)) => {
+                tracing::debug!("tap {}", key.label);
+                match key.action {
+                    Action::Key(keys) => self.effects.push(Effect::Keys(keys)),
+                    Action::Command(command) => self.effects.push(Effect::Command(command)),
+                    Action::ToggleStrip => self.expanded = !self.expanded,
+                    Action::Slider(_) => {}
+                }
+            }
             Some(Item::Media) => {
                 let (left, right) = self.spans[i];
-                self.clock = Instant::now();
                 match scrubber::hit(self.last_x * self.width - left, right - left) {
-                    scrubber::Hit::Button => play_pause(&mut self.now),
+                    scrubber::Hit::Button => self.play_pause(),
                     scrubber::Hit::Bar(fraction) => {
-                        seek(&mut self.now, self.drag.take().unwrap_or(fraction))
+                        let fraction = self.drag.take().unwrap_or(fraction);
+                        self.seek(fraction);
                     }
                 }
             }
             Some(Item::Slider { .. }) => {
                 if let Some(slider) = &mut self.open {
-                    sliders::set(slider.kind, slider.value);
+                    self.effects
+                        .push(Effect::SetLevel(slider.kind, slider.value));
                     slider.until = Instant::now() + SLIDER_STAYS;
                 }
             }
             None => {}
         }
-        Ok(())
+    }
+
+    // Flips the icon right away instead of waiting for the player to report back.
+    fn play_pause(&mut self) {
+        self.clock = Instant::now();
+        if let Some(now) = &mut self.now {
+            now.playing = !now.playing;
+            self.effects.push(Effect::PlayPause(now.app.clone()));
+        }
+    }
+
+    // Moves the bar right away instead of waiting for the player to report back.
+    fn seek(&mut self, fraction: f64) {
+        self.clock = Instant::now();
+        if let Some(now) = &mut self.now {
+            *now = now.at(fraction);
+            self.effects
+                .push(Effect::Seek(now.app.clone(), now.position));
+        }
     }
 
     fn update_player(&mut self) {
@@ -366,12 +462,12 @@ impl Bar {
     }
 }
 
-// Moves the knob under the finger at x pixels and tells the system, at most every SET_EVERY.
-fn slide(slider: &mut Open, x: f64, last_set: &mut Instant) {
+// Moves the knob under the finger at x pixels and asks for the new level, at most every SET_EVERY.
+fn slide(slider: &mut Open, x: f64, last_set: &mut Instant, effects: &mut Vec<Effect>) {
     slider.value = slider_view::hit(x - slider.left);
     if last_set.elapsed() > SET_EVERY {
         *last_set = Instant::now();
-        sliders::set(slider.kind, slider.value);
+        effects.push(Effect::SetLevel(slider.kind, slider.value));
     }
 }
 
@@ -403,52 +499,6 @@ fn reconcile(
     }
 }
 
-// Flips the icon right away and tells the player on a thread, so the bar never waits.
-fn play_pause(now: &mut Option<NowPlaying>) {
-    let now = match now {
-        Some(now) => now,
-        None => return,
-    };
-    now.playing = !now.playing;
-    let app = now.app.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = media::play_pause(&app) {
-            tracing::warn!("media: {e:#}");
-        }
-    });
-}
-
-fn seek(now: &mut Option<NowPlaying>, fraction: f64) {
-    let target = match now {
-        Some(now) => now.at(fraction),
-        None => return,
-    };
-    *now = Some(target.clone());
-    std::thread::spawn(move || {
-        if let Err(e) = media::seek_to(&target.app, target.position) {
-            tracing::warn!("media: {e:#}");
-        }
-    });
-}
-
-fn tap(keyboard: &mut Keyboard, key: &Key, expanded: &mut bool) -> anyhow::Result<()> {
-    tracing::debug!("tap {}", key.label);
-    match &key.action {
-        Action::Key(keys) => keyboard.tap(keys)?,
-        Action::Command(command) => {
-            let mut child = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .spawn()?;
-            // Reap it or it becomes a zombie.
-            std::thread::spawn(move || child.wait());
-        }
-        Action::ToggleStrip => *expanded = !*expanded,
-        Action::Slider(_) => {}
-    }
-    Ok(())
-}
-
 fn watch_config(tx: Sender<Event>) -> anyhow::Result<Option<RecommendedWatcher>> {
     let dir = Config::dir();
     if !dir.exists() {
@@ -465,4 +515,206 @@ fn watch_config(tx: Sender<Event>) -> anyhow::Result<Option<RecommendedWatcher>>
     // Editors save a temp file and rename it, so watch the folder instead of the file.
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
     Ok(Some(watcher))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONFIG: &str = r#"
+        esc = { label = "esc", key = "KEY_ESC" }
+
+        [strip]
+        collapsed = [{ label = "b", slider = "brightness" }]
+        expanded = [[{ label = "up", key = "KEY_VOLUMEUP" }]]
+
+        [layouts.default]
+        groups = [[{ widget = "media" }]]
+
+        [layouts.test]
+        apps = ["test"]
+        groups = [
+            [{ label = "a", key = "KEY_A" }, { label = "copy", key = "KEY_LEFTCTRL+KEY_C" }],
+            [{ label = "run", command = "true" }],
+        ]
+    "#;
+
+    // A bar with the "test" app focused. Every slider starts at 0.4.
+    fn bar() -> Bar {
+        let mut bar = Bar::new(Config::parse(CONFIG).unwrap(), 2170.0, |_| 0.4);
+        bar.handle(Some(Event::Focus(Window {
+            class: "test".to_string(),
+            title: String::new(),
+        })));
+        bar
+    }
+
+    // The touch position of the middle of the key with this label.
+    fn on(bar: &Bar, label: &str) -> f64 {
+        let i = bar
+            .layout
+            .items()
+            .position(|item| matches!(item, Item::Key(key) if key.label == label))
+            .unwrap();
+        let (left, right) = bar.spans[i];
+        (left + right) / 2.0 / bar.width
+    }
+
+    fn shows(bar: &Bar, label: &str) -> bool {
+        bar.layout
+            .items()
+            .any(|item| matches!(item, Item::Key(key) if key.label == label))
+    }
+
+    fn media_span(bar: &Bar) -> (f64, f64) {
+        let i = bar
+            .layout
+            .items()
+            .position(|item| *item == Item::Media)
+            .unwrap();
+        bar.spans[i]
+    }
+
+    fn lift(bar: &mut Bar) -> Vec<Effect> {
+        bar.handle(Some(Event::Release));
+        std::mem::take(&mut bar.effects)
+    }
+
+    fn tap(bar: &mut Bar, x: f64) -> Vec<Effect> {
+        bar.handle(Some(Event::Touch(x)));
+        lift(bar)
+    }
+
+    fn start_playing(bar: &mut Bar) {
+        bar.handle(Some(Event::Media(vec![NowPlaying {
+            app: "test".to_string(),
+            title: String::new(),
+            playing: true,
+            position: Duration::from_secs(10),
+            length: Duration::from_secs(100),
+        }])));
+    }
+
+    #[test]
+    fn a_key_fires_when_the_finger_lifts() {
+        let mut bar = bar();
+        let x = on(&bar, "copy");
+        bar.handle(Some(Event::Touch(x)));
+        assert!(bar.effects.is_empty());
+        assert_eq!(
+            lift(&mut bar),
+            vec![Effect::Keys(vec![KeyCode::KEY_LEFTCTRL, KeyCode::KEY_C])]
+        );
+    }
+
+    #[test]
+    fn the_key_under_the_finger_when_it_lifts_is_the_one_that_fires() {
+        let mut bar = bar();
+        let (a, run) = (on(&bar, "a"), on(&bar, "run"));
+        bar.handle(Some(Event::Touch(a)));
+        bar.handle(Some(Event::Touch(run)));
+        assert_eq!(lift(&mut bar), vec![Effect::Command("true".to_string())]);
+    }
+
+    #[test]
+    fn lifting_in_a_gap_does_nothing() {
+        let mut bar = bar();
+        let gap = (bar.spans[0].1 + 10.0) / bar.width;
+        assert!(tap(&mut bar, gap).is_empty());
+    }
+
+    #[test]
+    fn the_chevron_expands_the_strip_and_the_x_closes_it() {
+        let mut bar = bar();
+        let chevron = on(&bar, "\u{f104}");
+        tap(&mut bar, chevron);
+        assert!(shows(&bar, "up"));
+        assert!(!shows(&bar, "a"));
+
+        let close = on(&bar, "\u{f0159}");
+        tap(&mut bar, close);
+        assert!(shows(&bar, "a"));
+        assert!(!shows(&bar, "up"));
+    }
+
+    #[test]
+    fn a_tapped_slider_opens_sets_the_level_when_touched_and_closes_after_a_moment() {
+        let mut bar = bar();
+        let key = on(&bar, "b");
+        assert!(tap(&mut bar, key).is_empty());
+        assert!(bar.open.is_some());
+
+        let (left, right) = *bar.spans.last().unwrap();
+        let middle = (left + right) / 2.0 / bar.width;
+        let effects = tap(&mut bar, middle);
+        let value = bar.open.as_ref().unwrap().value;
+        assert_eq!(
+            effects.last(),
+            Some(&Effect::SetLevel(Slider::Brightness, value))
+        );
+
+        bar.open.as_mut().unwrap().until = Instant::now() - Duration::from_millis(1);
+        bar.handle(None);
+        assert!(bar.open.is_none());
+        assert!(shows(&bar, "b"));
+    }
+
+    #[test]
+    fn holding_a_slider_key_and_sliding_sets_the_level_on_lift() {
+        let mut bar = bar();
+        let key = on(&bar, "b");
+        bar.handle(Some(Event::Touch(key)));
+        bar.handle(Some(Event::Touch(key - 0.05)));
+        let first = bar.open.as_ref().unwrap().value;
+        bar.handle(Some(Event::Touch(key - 0.1)));
+        let second = bar.open.as_ref().unwrap().value;
+        assert!(second < first);
+
+        bar.effects.clear();
+        assert_eq!(
+            lift(&mut bar),
+            vec![Effect::SetLevel(Slider::Brightness, second)]
+        );
+        assert!(bar.open.is_none());
+    }
+
+    #[test]
+    fn resting_on_a_slider_key_opens_the_slider_after_a_moment() {
+        let mut bar = bar();
+        let key = on(&bar, "b");
+        bar.handle(Some(Event::Touch(key)));
+        assert!(bar.open.is_none());
+
+        bar.hold.as_mut().unwrap().since = Instant::now() - HOLD_AFTER * 2;
+        bar.handle(None);
+        assert!(bar.open.is_some());
+    }
+
+    #[test]
+    fn the_media_button_flips_the_icon_at_once_and_tells_the_player() {
+        let mut bar = bar();
+        start_playing(&mut bar);
+        let (left, _) = media_span(&bar);
+        let button = (left + 10.0) / bar.width;
+        assert_eq!(
+            tap(&mut bar, button),
+            vec![Effect::PlayPause("test".to_string())]
+        );
+        assert!(!bar.now.as_ref().unwrap().playing);
+    }
+
+    #[test]
+    fn dragging_the_media_bar_seeks_to_where_the_finger_lifts() {
+        let mut bar = bar();
+        start_playing(&mut bar);
+        let (left, right) = media_span(&bar);
+        bar.handle(Some(Event::Touch((left + 300.0) / bar.width)));
+        bar.handle(Some(Event::Touch((right - 1.0) / bar.width)));
+
+        bar.effects.clear();
+        assert_eq!(
+            lift(&mut bar),
+            vec![Effect::Seek("test".to_string(), Duration::from_secs(100))]
+        );
+    }
 }
