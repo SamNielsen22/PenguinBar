@@ -8,7 +8,6 @@ use drm::control::dumbbuffer::DumbBuffer;
 use drm::control::{connector, framebuffer, ClipRect, Device as ControlDevice, Mode};
 use drm::Device;
 
-use super::Display;
 use crate::render::Canvas;
 
 const BACKLIGHT: &str = "/sys/class/backlight/appletb_backlight/brightness";
@@ -148,16 +147,14 @@ impl DrmDisplay {
             fb,
         })
     }
-}
 
-impl Display for DrmDisplay {
     // The panel is 60x2170 portrait. We treat it as 2170x60.
-    fn size(&self) -> (u32, u32) {
+    pub fn size(&self) -> (u32, u32) {
         let (w, h) = self.mode.size();
         (h as u32, w as u32)
     }
 
-    fn present(&mut self, canvas: &Canvas) -> anyhow::Result<()> {
+    pub fn present(&mut self, canvas: &Canvas) -> anyhow::Result<()> {
         let (w, h) = self.mode.size();
         let dst_stride = self.buffer.pitch() as usize;
         let row = w as usize * 4;

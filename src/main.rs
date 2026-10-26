@@ -20,7 +20,6 @@ use config::Config;
 use layout::{Item, Slider};
 use media::NowPlaying;
 use render::{keys, Canvas};
-use transport::Display;
 
 const PANEL: (u32, u32) = (2170, 60);
 

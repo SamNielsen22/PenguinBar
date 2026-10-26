@@ -31,7 +31,6 @@ const fn rgb(hex: u32) -> Rgb {
     )
 }
 
-pub const INSET: f64 = 0.0;
 pub const DIVIDER_WIDTH: f64 = 4.0;
 const RADIUS: f64 = 6.0;
 
@@ -40,15 +39,12 @@ pub fn colour(cr: &Context, (r, g, b): Rgb) {
 }
 
 pub fn rounded_rect(cr: &Context, left: f64, right: f64, height: f64) {
-    rounded_box(cr, left, INSET, right, height - INSET, RADIUS);
-}
-
-fn rounded_box(cr: &Context, left: f64, top: f64, right: f64, bottom: f64, radius: f64) {
+    let r = RADIUS;
     cr.new_sub_path();
-    cr.arc(right - radius, top + radius, radius, -FRAC_PI_2, 0.0);
-    cr.arc(right - radius, bottom - radius, radius, 0.0, FRAC_PI_2);
-    cr.arc(left + radius, bottom - radius, radius, FRAC_PI_2, PI);
-    cr.arc(left + radius, top + radius, radius, PI, 3.0 * FRAC_PI_2);
+    cr.arc(right - r, r, r, -FRAC_PI_2, 0.0);
+    cr.arc(right - r, height - r, r, 0.0, FRAC_PI_2);
+    cr.arc(left + r, height - r, r, FRAC_PI_2, PI);
+    cr.arc(left + r, r, r, PI, 3.0 * FRAC_PI_2);
     cr.close_path();
 }
 

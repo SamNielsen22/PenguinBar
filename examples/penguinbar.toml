@@ -9,7 +9,7 @@
 #   slider  = "brightness", "volume" or "keyboard". Tap to open, or hold and slide.
 # Labels can be text or Nerd Font icons. Keys in a group share one plate.
 #
-# { widget = "media" } is prev / play / next plus a scrubber. Appears while something plays.
+# { widget = "media" } is play / pause plus a scrubber. Appears while something plays.
 
 # Far left. Always.
 esc = { label = "esc", key = "KEY_ESC" }
@@ -75,6 +75,10 @@ groups = [
 [layouts.music]
 apps = ["spotify"]
 groups = [
+    [
+        { label = "󰒮", key = "KEY_LEFTCTRL+KEY_LEFT" },
+        { label = "󰒭", key = "KEY_LEFTCTRL+KEY_RIGHT" },
+    ],
     [{ widget = "media" }],
     [
         { label = "󰒝", key = "KEY_LEFTCTRL+KEY_S" },

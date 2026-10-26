@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::actions::Keyboard;
@@ -13,7 +14,6 @@ use crate::render::{keys, media as scrubber, slider as slider_view, Canvas};
 use crate::sliders;
 use crate::state::{self, Window};
 use crate::transport::drm::DrmDisplay;
-use crate::transport::Display;
 
 // Only needed while a slider is held or open.
 const TICK: Duration = Duration::from_millis(50);
@@ -21,6 +21,9 @@ const TICK: Duration = Duration::from_millis(50);
 const SLIDE_AFTER: f64 = 0.004;
 const HOLD_AFTER: Duration = Duration::from_millis(250);
 const SLIDER_STAYS: Duration = Duration::from_secs(1);
+// Sliders and seeks tell the system at most this often while dragging.
+const SET_EVERY: Duration = Duration::from_millis(100);
+
 #[derive(Debug)]
 pub enum Event {
     // 0.0 is the left edge, 1.0 the right.
@@ -40,6 +43,21 @@ struct Hold {
     sliding: bool,
 }
 
+impl Hold {
+    // The slider this hold opens, with the knob under where the finger landed.
+    fn open(&self, width: f64, until: Instant) -> Open {
+        let x = self.start_x * width;
+        let left =
+            (x - slider_view::knob_at(self.start_value)).clamp(0.0, width - slider_view::WIDTH);
+        Open {
+            kind: self.kind,
+            value: self.start_value,
+            left,
+            until,
+        }
+    }
+}
+
 struct Open {
     kind: Slider,
     value: f64,
@@ -48,16 +66,6 @@ struct Open {
 }
 
 impl Open {
-    fn under(kind: Slider, value: f64, x: f64, width: f64, until: Instant) -> Open {
-        let left = (x - slider_view::knob_at(value)).clamp(0.0, width - slider_view::WIDTH);
-        Open {
-            kind,
-            value,
-            left,
-            until,
-        }
-    }
-
     fn item(&self) -> Item {
         Item::Slider {
             kind: self.kind,
@@ -67,12 +75,32 @@ impl Open {
     }
 }
 
+struct Bar {
+    config: Config,
+    keyboard: Keyboard,
+    width: f64,
+    window: Window,
+    expanded: bool,
+    players: Vec<NowPlaying>,
+    // The player in the focused window.
+    now: Option<NowPlaying>,
+    // When now.position was last updated. Used to move it on by the time since.
+    clock: Instant,
+    layout: Layout,
+    spans: keys::Spans,
+    pressed: Option<usize>,
+    last_x: f64,
+    drag: Option<f64>,
+    hold: Option<Hold>,
+    open: Option<Open>,
+    last_set: Instant,
+}
+
 pub fn run() -> anyhow::Result<()> {
-    let mut config = Config::load()?;
-    let mut keyboard = Keyboard::new()?;
+    let config = Config::load()?;
+    let keyboard = Keyboard::new()?;
     let mut display = DrmDisplay::open()?;
     let (width, _) = display.size();
-    let width = width as f64;
 
     let (tx, rx) = mpsc::channel();
     input::spawn_reader(input::find_touch_device()?, tx.clone())?;
@@ -80,245 +108,268 @@ pub fn run() -> anyhow::Result<()> {
     media::spawn_watcher(tx.clone());
     let _watcher = watch_config(tx)?;
 
-    let mut window = Window::default();
-    let mut expanded = false;
-    let mut players: Vec<NowPlaying> = Vec::new();
-    // The player in the focused window.
-    let mut now: Option<NowPlaying> = None;
-    // When now.position was last updated. Used to move it on by the time since.
-    let mut clock = Instant::now();
-    let mut layout = config.layout_for(&window.class, expanded, false, None);
-    let mut spans = keys::spans(&layout, width);
-    let mut pressed = None;
-    let mut last_x = 0.0;
-    let mut drag = None;
-    let mut hold: Option<Hold> = None;
-    let mut open: Option<Open> = None;
-    let mut last_set = Instant::now();
+    let mut bar = Bar::new(config, keyboard, width as f64);
+    bar.draw(&mut display)?;
     // Other events pulled out of the queue while skipping old touches.
     let mut pending = VecDeque::new();
-    draw(&mut display, &layout, pressed, None)?;
 
     loop {
-        let mut redraw = false;
-        let timed = hold.is_some() || open.is_some();
-        let mut event = match pending.pop_front() {
-            Some(event) => Some(event),
-            None if timed => match rx.recv_timeout(TICK) {
-                Ok(event) => Some(event),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => {
-                    anyhow::bail!("every event source has stopped")
-                }
-            },
-            None => match rx.recv() {
-                Ok(event) => Some(event),
-                Err(_) => anyhow::bail!("every event source has stopped"),
-            },
-        };
+        let timed = bar.hold.is_some() || bar.open.is_some();
+        let event = next_event(&rx, &mut pending, timed)?;
         let mut changed = event.is_some();
-        // Touches come in faster than we can draw, so skip to the newest.
-        if let Some(Event::Touch(_)) = event {
-            while let Ok(next) = rx.try_recv() {
-                match next {
-                    Event::Touch(_) => event = Some(next),
-                    other => {
-                        pending.push_back(other);
-                        break;
-                    }
-                }
-            }
-        }
+        let mut redraw = false;
         match event {
-            Some(Event::Touch(x)) => {
-                last_x = x;
-                let next = keys::key_at(&spans, x * width);
-                if next != pressed {
-                    pressed = next;
-                    drag = None;
-                    redraw = true;
-                }
-                let item = next.and_then(|i| layout.items().nth(i));
-                if let (None, Some(Item::Key(key))) = (&hold, item) {
-                    if let Action::Slider(kind) = key.action {
-                        let start_value = sliders::get(kind).unwrap_or(0.5);
-                        hold = Some(Hold {
-                            kind,
-                            since: Instant::now(),
-                            start_x: x,
-                            start_value,
-                            sliding: false,
-                        });
-                    }
-                }
-                if let Some(hold) = &mut hold {
-                    if hold.sliding || (x - hold.start_x).abs() > SLIDE_AFTER {
-                        hold.sliding = true;
-                        let slider = open.get_or_insert_with(|| {
-                            Open::under(
-                                hold.kind,
-                                hold.start_value,
-                                hold.start_x * width,
-                                width,
-                                Instant::now(),
-                            )
-                        });
-                        slide(
-                            slider,
-                            slider_view::hit(x * width - slider.left),
-                            &mut last_set,
-                        );
-                        redraw = true;
-                    }
-                }
-                if let (Some(Item::Slider { .. }), Some(slider), None) = (item, &mut open, &hold) {
-                    slide(
-                        slider,
-                        slider_view::hit(x * width - slider.left),
-                        &mut last_set,
-                    );
-                    slider.until = Instant::now() + SLIDER_STAYS;
-                    redraw = true;
-                }
-                if let (Some(i), Some(Item::Media)) = (next, item) {
-                    let (left, right) = spans[i];
-                    if let scrubber::Hit::Bar(fraction) =
-                        scrubber::hit(x * width - left, right - left)
-                    {
-                        if drag != Some(fraction) {
-                            drag = Some(fraction);
-                            redraw = true;
-                        }
-                        if last_set.elapsed() > Duration::from_millis(100) {
-                            last_set = Instant::now();
-                            clock = Instant::now();
-                            seek(&mut now, fraction);
-                        }
-                    }
-                }
-            }
+            Some(Event::Touch(x)) => redraw = bar.touch(x),
             Some(Event::Release) => {
-                let i = pressed.take().unwrap_or(usize::MAX);
-                let item = layout.items().nth(i);
-                let x = last_x;
+                bar.release()?;
                 redraw = true;
-                if let Some(hold) = hold.take() {
-                    // Slide then lift closes it. A plain tap opens it.
-                    open = match (hold.sliding, open.take()) {
-                        (true, Some(slider)) => {
-                            sliders::set(slider.kind, slider.value);
-                            None
-                        }
-                        _ => {
-                            let until = Instant::now() + SLIDER_STAYS;
-                            Some(Open::under(
-                                hold.kind,
-                                hold.start_value,
-                                hold.start_x * width,
-                                width,
-                                until,
-                            ))
-                        }
-                    };
-                } else {
-                    match item {
-                        Some(Item::Key(key)) => tap(&mut keyboard, key, &mut expanded)?,
-                        Some(Item::Media) => {
-                            let app = now.as_ref().map(|now| now.app.clone()).unwrap_or_default();
-                            let (left, right) = spans[i];
-                            let result = match scrubber::hit(x * width - left, right - left) {
-                                scrubber::Hit::Previous => media::previous(&app),
-                                scrubber::Hit::PlayPause => media::play_pause(&app),
-                                scrubber::Hit::Next => media::next(&app),
-                                scrubber::Hit::Bar(fraction) => {
-                                    clock = Instant::now();
-                                    seek(&mut now, drag.take().unwrap_or(fraction));
-                                    Ok(())
-                                }
-                            };
-                            if let Err(e) = result {
-                                tracing::warn!("media: {e:#}");
-                            }
-                        }
-                        Some(Item::Slider { .. }) => {
-                            if let Some(slider) = &mut open {
-                                sliders::set(slider.kind, slider.value);
-                                slider.until = Instant::now() + SLIDER_STAYS;
-                            }
-                        }
-                        None => {}
-                    }
-                }
             }
-            Some(Event::Focus(focused)) => {
-                window = focused;
-                now = reconcile(now, media::for_window(&players, &window), &mut clock);
+            Some(Event::Focus(window)) => {
+                bar.window = window;
+                bar.update_player();
             }
-            Some(Event::Media(update)) => {
-                players = update;
-                now = reconcile(now, media::for_window(&players, &window), &mut clock);
+            Some(Event::Media(players)) => {
+                bar.players = players;
+                bar.update_player();
                 redraw = true;
             }
             Some(Event::ConfigChanged) => match Config::load() {
-                Ok(new_config) => config = new_config,
+                Ok(config) => bar.config = config,
                 Err(e) => tracing::error!("config not reloaded: {e:#}"),
             },
             None => {}
         }
-
-        if let Some(hold) = &mut hold {
-            if !hold.sliding && hold.since.elapsed() > HOLD_AFTER {
-                hold.sliding = true;
-                open = Some(Open::under(
-                    hold.kind,
-                    hold.start_value,
-                    hold.start_x * width,
-                    width,
-                    Instant::now(),
-                ));
-                changed = true;
-            }
+        if bar.run_timers() {
+            changed = true;
         }
-
-        if let Some(slider) = &open {
-            if hold.is_none() && pressed.is_none() && Instant::now() > slider.until {
-                open = None;
-                changed = true;
-            }
-        }
-
-        if changed {
-            let has_media = now.is_some();
-            let wanted = config.layout_for(
-                &window.class,
-                expanded,
-                has_media,
-                open.as_ref().map(Open::item),
-            );
-            if wanted != layout {
-                layout = wanted;
-                // A moving knob changes the layout but not where the keys are, so keep pressed.
-                let new_spans = keys::spans(&layout, width);
-                if new_spans != spans {
-                    spans = new_spans;
-                    pressed = None;
-                }
-                redraw = true;
-            }
+        if changed && bar.update_layout() {
+            redraw = true;
         }
         if redraw {
-            let shown = match (&now, drag) {
-                (Some(now), Some(fraction)) => Some(now.at(fraction)),
-                _ => now.clone(),
-            };
-            draw(&mut display, &layout, pressed, shown.as_ref())?;
+            bar.draw(&mut display)?;
         }
     }
 }
 
-fn slide(slider: &mut Open, value: f64, last_set: &mut Instant) {
-    slider.value = value.clamp(0.0, 1.0);
-    if last_set.elapsed() > Duration::from_millis(100) {
+// Waits for the next event, or None when a slider's timer is due.
+// Touches come in faster than we can draw, so skip to the newest.
+fn next_event(
+    rx: &Receiver<Event>,
+    pending: &mut VecDeque<Event>,
+    timed: bool,
+) -> anyhow::Result<Option<Event>> {
+    let mut event = match pending.pop_front() {
+        Some(event) => event,
+        None if timed => match rx.recv_timeout(TICK) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => return Ok(None),
+            Err(RecvTimeoutError::Disconnected) => anyhow::bail!("every event source has stopped"),
+        },
+        None => rx.recv().context("every event source has stopped")?,
+    };
+    if let Event::Touch(_) = event {
+        while let Ok(next) = rx.try_recv() {
+            match next {
+                Event::Touch(_) => event = next,
+                other => {
+                    pending.push_back(other);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(Some(event))
+}
+
+impl Bar {
+    fn new(config: Config, keyboard: Keyboard, width: f64) -> Bar {
+        let layout = config.layout_for("", false, false, None);
+        let spans = keys::spans(&layout, width);
+        Bar {
+            config,
+            keyboard,
+            width,
+            window: Window::default(),
+            expanded: false,
+            players: Vec::new(),
+            now: None,
+            clock: Instant::now(),
+            layout,
+            spans,
+            pressed: None,
+            last_x: 0.0,
+            drag: None,
+            hold: None,
+            open: None,
+            last_set: Instant::now(),
+        }
+    }
+
+    // Returns whether the bar needs redrawing.
+    fn touch(&mut self, x: f64) -> bool {
+        self.last_x = x;
+        let mut redraw = false;
+        let next = keys::key_at(&self.spans, x * self.width);
+        if next != self.pressed {
+            self.pressed = next;
+            self.drag = None;
+            redraw = true;
+        }
+        let item = next.and_then(|i| self.layout.items().nth(i)).cloned();
+
+        // A finger landing on a slider key may be the start of a slide.
+        if let (None, Some(Item::Key(key))) = (&self.hold, &item) {
+            if let Action::Slider(kind) = key.action {
+                self.hold = Some(Hold {
+                    kind,
+                    since: Instant::now(),
+                    start_x: x,
+                    start_value: sliders::get(kind).unwrap_or(0.5),
+                    sliding: false,
+                });
+            }
+        }
+        if let Some(hold) = &mut self.hold {
+            if hold.sliding || (x - hold.start_x).abs() > SLIDE_AFTER {
+                hold.sliding = true;
+                let slider = self
+                    .open
+                    .get_or_insert_with(|| hold.open(self.width, Instant::now()));
+                slide(slider, x * self.width, &mut self.last_set);
+                redraw = true;
+            }
+        }
+
+        // Dragging a slider that a tap opened.
+        if let (Some(Item::Slider { .. }), Some(slider), None) = (&item, &mut self.open, &self.hold)
+        {
+            slide(slider, x * self.width, &mut self.last_set);
+            slider.until = Instant::now() + SLIDER_STAYS;
+            redraw = true;
+        }
+
+        if let (Some(i), Some(Item::Media)) = (next, &item) {
+            let (left, right) = self.spans[i];
+            if let scrubber::Hit::Bar(fraction) = scrubber::hit(x * self.width - left, right - left)
+            {
+                if self.drag != Some(fraction) {
+                    self.drag = Some(fraction);
+                    redraw = true;
+                }
+                if self.last_set.elapsed() > SET_EVERY {
+                    self.last_set = Instant::now();
+                    self.clock = Instant::now();
+                    seek(&mut self.now, fraction);
+                }
+            }
+        }
+        redraw
+    }
+
+    fn release(&mut self) -> anyhow::Result<()> {
+        let pressed = self.pressed.take();
+        if let Some(hold) = self.hold.take() {
+            // Slide then lift closes it. A plain tap opens it.
+            self.open = match (hold.sliding, self.open.take()) {
+                (true, Some(slider)) => {
+                    sliders::set(slider.kind, slider.value);
+                    None
+                }
+                _ => Some(hold.open(self.width, Instant::now() + SLIDER_STAYS)),
+            };
+            return Ok(());
+        }
+        let i = match pressed {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+        match self.layout.items().nth(i).cloned() {
+            Some(Item::Key(key)) => tap(&mut self.keyboard, &key, &mut self.expanded)?,
+            Some(Item::Media) => {
+                let (left, right) = self.spans[i];
+                self.clock = Instant::now();
+                match scrubber::hit(self.last_x * self.width - left, right - left) {
+                    scrubber::Hit::Button => play_pause(&mut self.now),
+                    scrubber::Hit::Bar(fraction) => {
+                        seek(&mut self.now, self.drag.take().unwrap_or(fraction))
+                    }
+                }
+            }
+            Some(Item::Slider { .. }) => {
+                if let Some(slider) = &mut self.open {
+                    sliders::set(slider.kind, slider.value);
+                    slider.until = Instant::now() + SLIDER_STAYS;
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn update_player(&mut self) {
+        let theirs = media::for_window(&self.players, &self.window);
+        self.now = reconcile(self.now.take(), theirs, &mut self.clock);
+    }
+
+    // A long press starts a slide, and a tapped-open slider closes after a quiet moment.
+    // Returns whether anything changed.
+    fn run_timers(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(hold) = &mut self.hold {
+            if !hold.sliding && hold.since.elapsed() > HOLD_AFTER {
+                hold.sliding = true;
+                self.open = Some(hold.open(self.width, Instant::now()));
+                changed = true;
+            }
+        }
+        if let Some(slider) = &self.open {
+            if self.hold.is_none() && self.pressed.is_none() && Instant::now() > slider.until {
+                self.open = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    // Returns whether the layout changed.
+    fn update_layout(&mut self) -> bool {
+        let slider = self.open.as_ref().map(Open::item);
+        let wanted = self.config.layout_for(
+            &self.window.class,
+            self.expanded,
+            self.now.is_some(),
+            slider,
+        );
+        if wanted == self.layout {
+            return false;
+        }
+        self.layout = wanted;
+        // A moving knob changes the layout but not where the keys are, so keep pressed.
+        let spans = keys::spans(&self.layout, self.width);
+        if spans != self.spans {
+            self.spans = spans;
+            self.pressed = None;
+        }
+        true
+    }
+
+    fn draw(&self, display: &mut DrmDisplay) -> anyhow::Result<()> {
+        // While dragging, show the bar where the finger is.
+        let shown = match (&self.now, self.drag) {
+            (Some(now), Some(fraction)) => Some(now.at(fraction)),
+            _ => self.now.clone(),
+        };
+        let (width, height) = display.size();
+        let mut canvas = Canvas::new(width, height)?;
+        keys::draw_row(&mut canvas, &self.layout, self.pressed, shown.as_ref())?;
+        display.present(&canvas)
+    }
+}
+
+// Moves the knob under the finger at x pixels and tells the system, at most every SET_EVERY.
+fn slide(slider: &mut Open, x: f64, last_set: &mut Instant) {
+    slider.value = slider_view::hit(x - slider.left);
+    if last_set.elapsed() > SET_EVERY {
         *last_set = Instant::now();
         sliders::set(slider.kind, slider.value);
     }
@@ -350,6 +401,21 @@ fn reconcile(
     } else {
         Some(theirs)
     }
+}
+
+// Flips the icon right away and tells the player on a thread, so the bar never waits.
+fn play_pause(now: &mut Option<NowPlaying>) {
+    let now = match now {
+        Some(now) => now,
+        None => return,
+    };
+    now.playing = !now.playing;
+    let app = now.app.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = media::play_pause(&app) {
+            tracing::warn!("media: {e:#}");
+        }
+    });
 }
 
 fn seek(now: &mut Option<NowPlaying>, fraction: f64) {
@@ -399,16 +465,4 @@ fn watch_config(tx: Sender<Event>) -> anyhow::Result<Option<RecommendedWatcher>>
     // Editors save a temp file and rename it, so watch the folder instead of the file.
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
     Ok(Some(watcher))
-}
-
-fn draw(
-    display: &mut DrmDisplay,
-    layout: &Layout,
-    pressed: Option<usize>,
-    now: Option<&NowPlaying>,
-) -> anyhow::Result<()> {
-    let (width, height) = display.size();
-    let mut canvas = Canvas::new(width, height)?;
-    keys::draw_row(&mut canvas, layout, pressed, now)?;
-    display.present(&canvas)
 }

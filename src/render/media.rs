@@ -3,14 +3,13 @@ use std::time::Duration;
 use cairo::Context;
 
 use super::{
-    centred_text, colour, rounded_rect, ACCENT, DIVIDER, DIVIDER_WIDTH, FONT, INSET, LABEL, PLATE,
+    centred_text, colour, rounded_rect, ACCENT, DIVIDER, DIVIDER_WIDTH, FONT, LABEL, PLATE,
     TEXT_FONT, TRACK,
 };
 use crate::media::NowPlaying;
 
-pub const MIN_WIDTH: f64 = 700.0;
-const BUTTON: f64 = 110.0;
-const BUTTONS: f64 = 3.0 * BUTTON;
+pub const MIN_WIDTH: f64 = 500.0;
+const BUTTON: f64 = 136.0;
 const TIME: f64 = 110.0;
 const BAR_HEIGHT: f64 = 4.0;
 const PLAYHEAD_HEIGHT: f64 = 32.0;
@@ -18,29 +17,21 @@ const ICON_SIZE: f64 = 32.0;
 const TEXT_SIZE: f64 = 24.0;
 
 pub enum Hit {
-    Previous,
-    PlayPause,
-    Next,
+    Button,
     Bar(f64),
 }
 
 // x is from the widget's left edge.
 pub fn hit(x: f64, width: f64) -> Hit {
     if x < BUTTON {
-        return Hit::Previous;
-    }
-    if x < 2.0 * BUTTON {
-        return Hit::PlayPause;
-    }
-    if x < BUTTONS {
-        return Hit::Next;
+        return Hit::Button;
     }
     let (start, end) = bar(width);
     Hit::Bar(((x - start) / (end - start)).clamp(0.0, 1.0))
 }
 
 fn bar(width: f64) -> (f64, f64) {
-    (BUTTONS + TIME, width - TIME)
+    (BUTTON + TIME, width - TIME)
 }
 
 pub fn draw(
@@ -56,26 +47,16 @@ pub fn draw(
     rounded_rect(cr, left, left + width, height);
     cr.fill()?;
     colour(cr, DIVIDER);
-    for i in 1..=3 {
-        cr.rectangle(
-            left + BUTTON * i as f64,
-            INSET,
-            DIVIDER_WIDTH,
-            height - 2.0 * INSET,
-        );
-    }
+    cr.rectangle(left + BUTTON, 0.0, DIVIDER_WIDTH, height);
     cr.fill()?;
 
-    let play = if now.playing {
+    let icon = if now.playing {
         "\u{f03e4}"
     } else {
         "\u{f040a}"
     };
     colour(cr, LABEL);
-    for (i, icon) in ["\u{f04ae}", play, "\u{f04ad}"].iter().enumerate() {
-        let centre = left + BUTTON * (i as f64 + 0.5);
-        centred_text(cr, FONT, ICON_SIZE, icon, centre, mid)?;
-    }
+    centred_text(cr, FONT, ICON_SIZE, icon, left + BUTTON / 2.0, mid)?;
 
     let left_over = now.length.saturating_sub(now.position);
     centred_text(
@@ -83,7 +64,7 @@ pub fn draw(
         TEXT_FONT,
         TEXT_SIZE,
         &clock(now.position),
-        left + BUTTONS + TIME / 2.0,
+        left + BUTTON + TIME / 2.0,
         mid,
     )?;
     centred_text(
@@ -127,11 +108,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_buttons_are_at_the_left_and_the_bar_runs_between_the_times() {
+    fn the_button_is_at_the_left_and_the_bar_runs_between_the_times() {
         let width = 800.0;
-        assert!(matches!(hit(10.0, width), Hit::Previous));
-        assert!(matches!(hit(BUTTON + 10.0, width), Hit::PlayPause));
-        assert!(matches!(hit(BUTTONS - 10.0, width), Hit::Next));
+        assert!(matches!(hit(10.0, width), Hit::Button));
         let (start, end) = bar(width);
         assert!(matches!(hit(start, width), Hit::Bar(f) if f == 0.0));
         assert!(matches!(hit((start + end) / 2.0, width), Hit::Bar(f) if (f - 0.5).abs() < 0.01));

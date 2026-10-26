@@ -1,9 +1,7 @@
 use cairo::Context;
 
 use super::{centred_text, colour, media, rounded_rect, slider, Canvas, Rgb};
-use super::{
-    ACCENT, BACKGROUND, DIVIDER, DIVIDER_WIDTH, FONT, INSET, LABEL, ON_ACCENT, PLATE, TEXT_FONT,
-};
+use super::{ACCENT, BACKGROUND, DIVIDER, DIVIDER_WIDTH, FONT, LABEL, ON_ACCENT, PLATE, TEXT_FONT};
 use crate::layout::{Action, Item, Key, Layout};
 use crate::media::NowPlaying;
 
@@ -48,11 +46,11 @@ pub fn spans(layout: &Layout, width: f64) -> Spans {
     } else {
         shift - GROUP_GAP
     };
-    let stretch = stretch_width(layout, end);
+    let media_width = media_width(layout, end);
     let mut spans = Vec::new();
     let mut x = MARGIN;
     for group in &layout.groups {
-        x = place(group, x, &mut spans, stretch) + gap_after(group);
+        x = place(group, x, &mut spans, media_width) + gap_after(group);
     }
     spans.extend(strip.iter().map(|(l, r)| (l + shift, r + shift)));
     spans
@@ -71,29 +69,21 @@ fn is_esc(item: &Item) -> bool {
     matches!(item, Item::Key(key) if key.action == Action::Key(vec![evdev::KeyCode::KEY_ESC]))
 }
 
-fn place(items: &[Item], mut x: f64, spans: &mut Spans, stretch: f64) -> f64 {
+fn place(items: &[Item], mut x: f64, spans: &mut Spans, media_width: f64) -> f64 {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             x += DIVIDER_WIDTH;
         }
-        let w = width_of(item, stretch);
+        let w = width_of(item, media_width);
         spans.push((x, x + w));
         x += w;
     }
     x
 }
 
-// Media takes whatever space the keys don't fill.
-fn stretches(item: &Item) -> bool {
-    matches!(item, Item::Media)
-}
-
-fn stretch_width(layout: &Layout, end: f64) -> f64 {
-    let count = layout.items().filter(|item| stretches(item)).count();
-    if count == 0 {
-        return 0.0;
-    }
-    // Lay out with the stretching items at zero width to see what is free.
+// The media widget takes whatever space the keys don't fill.
+fn media_width(layout: &Layout, end: f64) -> f64 {
+    // Lay out with the media widget at zero width to see what is free.
     let mut unused = Vec::new();
     let mut x = MARGIN;
     let mut last_gap = 0.0;
@@ -102,17 +92,17 @@ fn stretch_width(layout: &Layout, end: f64) -> f64 {
         x = place(group, x, &mut unused, 0.0) + last_gap;
     }
     let free = end - (x - last_gap);
-    (free / count as f64).max(media::MIN_WIDTH)
+    free.max(media::MIN_WIDTH)
 }
 
 fn is_toggle(item: &Item) -> bool {
     matches!(item, Item::Key(key) if key.action == Action::ToggleStrip)
 }
 
-fn width_of(item: &Item, stretch: f64) -> f64 {
+fn width_of(item: &Item, media_width: f64) -> f64 {
     match item {
         Item::Slider { .. } => slider::WIDTH,
-        _ if stretches(item) => stretch,
+        Item::Media => media_width,
         _ if is_toggle(item) => TOGGLE_WIDTH,
         _ if is_esc(item) => ESC_WIDTH,
         _ => KEY_WIDTH,
@@ -151,12 +141,7 @@ pub fn draw_row(
                 let (l, r) = spans[i];
                 if l > left {
                     colour(cr, DIVIDER);
-                    cr.rectangle(
-                        l - DIVIDER_WIDTH,
-                        INSET,
-                        DIVIDER_WIDTH,
-                        height - 2.0 * INSET,
-                    );
+                    cr.rectangle(l - DIVIDER_WIDTH, 0.0, DIVIDER_WIDTH, height);
                     cr.fill()?;
                 }
                 match item {
@@ -166,7 +151,7 @@ pub fn draw_row(
                             rounded_rect(cr, left, right, height);
                             cr.clip();
                             colour(cr, ACCENT);
-                            cr.rectangle(l, INSET, r - l, height - 2.0 * INSET);
+                            cr.rectangle(l, 0.0, r - l, height);
                             cr.fill()?;
                             cr.reset_clip();
                             ink = ON_ACCENT;

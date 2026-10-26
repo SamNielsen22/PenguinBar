@@ -46,11 +46,25 @@ fn app_of(player: &Player) -> anyhow::Result<String> {
     Ok(app.to_lowercase())
 }
 
+// All players except playerctld, which only mirrors whichever one was active last.
+fn players(finder: &PlayerFinder) -> Vec<Player> {
+    let mut players = Vec::new();
+    for player in finder.find_all().unwrap_or_default() {
+        if player.bus_name_trimmed() != "playerctld" {
+            players.push(player);
+        }
+    }
+    players
+}
+
 // The player that says it is this app.
 fn player(app: &str) -> anyhow::Result<Player> {
-    for player in PlayerFinder::new()?.find_all()? {
-        if app_of(&player)? == app {
-            return Ok(player);
+    for player in players(&PlayerFinder::new()?) {
+        // Spotify also registers a broken Chromium player that can't report its name. Skip those.
+        if let Ok(name) = app_of(&player) {
+            if name == app {
+                return Ok(player);
+            }
         }
     }
     anyhow::bail!("{app} has no player")
@@ -75,7 +89,7 @@ fn now_playing(player: &Player) -> anyhow::Result<Option<NowPlaying>> {
 // Every player that is playing or paused.
 fn all_playing(finder: &PlayerFinder) -> Vec<NowPlaying> {
     let mut all = Vec::new();
-    for player in finder.find_all().unwrap_or_default() {
+    for player in players(finder) {
         if let Ok(Some(now)) = now_playing(&player) {
             all.push(now);
         }
@@ -116,16 +130,6 @@ pub fn spawn_watcher(tx: Sender<Event>) {
 
 pub fn play_pause(app: &str) -> anyhow::Result<()> {
     player(app)?.play_pause()?;
-    Ok(())
-}
-
-pub fn previous(app: &str) -> anyhow::Result<()> {
-    player(app)?.previous()?;
-    Ok(())
-}
-
-pub fn next(app: &str) -> anyhow::Result<()> {
-    player(app)?.next()?;
     Ok(())
 }
 
