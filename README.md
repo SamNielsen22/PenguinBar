@@ -2,6 +2,8 @@
 
 An app-aware Touch Bar for Linux for the 2016 and 2017 MacBook Pro.
 
+![PenguinBar on a MacBook Pro Touch Bar](docs/bar.jpg)
+
 ## What it does
 
 - Keys change with the focused window.
