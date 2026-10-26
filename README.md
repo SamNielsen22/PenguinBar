@@ -12,13 +12,7 @@ An app-aware Touch Bar for Linux for the 2016 and 2017 MacBook Pro.
 
 - Holding and sliding on buttons on the Control Strip brings up a slider to adjust their values, like macOS.
 
-Apps currently supported:
-
-Spotify
-
-Firefox
-
-kitty
+Apps with their own layout: Spotify, Firefox and kitty.
 
 ## Requirements
 
